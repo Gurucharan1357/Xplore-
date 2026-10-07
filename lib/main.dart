@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show File, Platform;
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -15,6 +16,7 @@ import 'package:xml/xml.dart';
 import 'package:file_picker/file_picker.dart'; 
 import 'package:share_plus/share_plus.dart'; 
 import 'package:path_provider/path_provider.dart'; 
+import 'package:your_app_name/screens/my_dashboard_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -117,7 +119,7 @@ class OfflineSyncManager {
         await removePending(item['id']);
         successCount++;
       } catch (e) {
-        print('Sync failed for item ${item['id']}: $e');
+        debugPrint('Sync failed for item ${item['id']}: $e');
       }
     }
     return successCount;
@@ -333,7 +335,7 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
     try {
       await GPXHelper.exportAndShareTrek(widget.trek);
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to export GPX: $e'), backgroundColor: Colors.redAccent));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to export GPX: $e'), backgroundColor: Colors.redAccent));
     }
   }
 
@@ -367,7 +369,7 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
     try {
       await Supabase.instance.client.from('trek_comments').insert({'trek_id': trekId, 'user_id': myId, 'body': text});
       _fetchSocialData();
-    } catch(e) {}
+    } catch(_) {}
   }
 
   String _calculateEstimatedTime() {
@@ -388,7 +390,8 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
       final List<LatLng> pts = coordinates.map((c) => LatLng(c[1] as double, c[0] as double)).toList();
 
       if (pts.isNotEmpty) {
-        await _mapController!.addLine(LineOptions(geometry: pts, lineColor: '#00E5FF', lineWidth: 6.0, lineJoin: 'round'));
+        // Updated to use the new "Corridor" style for consistency
+        await _mapController!.addLine(LineOptions(geometry: pts, lineColor: '#1A237E', lineWidth: 8.0, lineOpacity: 0.6, lineJoin: 'round'));
         await _mapController!.addCircle(CircleOptions(geometry: pts.first, circleRadius: 6.0, circleColor: '#00C853', circleStrokeWidth: 2.0, circleStrokeColor: '#FFFFFF'));
         await _mapController!.addCircle(CircleOptions(geometry: pts.last, circleRadius: 6.0, circleColor: '#FC4C02', circleStrokeWidth: 2.0, circleStrokeColor: '#FFFFFF'));
 
@@ -415,7 +418,7 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
 
         _mapController!.animateCamera(CameraUpdate.newLatLngBounds(LatLngBounds(southwest: LatLng(minLat, minLng), northeast: LatLng(maxLat, maxLng)), top: 40, bottom: 40, left: 40, right: 40));
       }
-    } catch (e) {}
+    } catch (_) {}
   }
 
   @override
@@ -506,8 +509,8 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                     width: double.infinity, height: 56,
                     child: ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF007AFF), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28))),
-                      icon: const Icon(Icons.play_arrow, color: Colors.white, size: 24),
-                      label: const Text('START THIS TRAIL', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+                      icon: const Icon(Icons.navigation_rounded, color: Colors.white, size: 24),
+                      label: const Text('START NAVIGATION', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
                       onPressed: () { Navigator.pop(context); widget.onStartTrail(); },
                     ),
                   ),
@@ -567,21 +570,23 @@ class _ExploreScreenState extends State<ExploreScreen> {
       }
 
       if (mounted) setState(() { _treks = data; _isLoading = false; });
-    } catch (e) {
+    } catch (_) {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _importGPX() async {
     try {
+      // FIX: FilePicker.platform.pickFiles correctly maps to the upgraded version
       final FilePickerResult? result = await FilePicker.platform.pickFiles(
-        type: FileType.custom, allowedExtensions: ['gpx', 'xml'],
+        type: FileType.custom, 
+        allowedExtensions: ['gpx', 'xml'],
       );
 
       if (result != null && result.files.single.path != null) {
         final File file = File(result.files.single.path!);
         final importedTrek = await GPXHelper.importTrek(file, result.files.single.name);
-        
+
         if (mounted && importedTrek != null) {
           Navigator.push(context, MaterialPageRoute(
             builder: (context) => TrailDetailScreen(
@@ -611,7 +616,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
       } else {
         await Supabase.instance.client.from('follows').insert({'follower_id': myId, 'following_id': targetUserId});
       }
-    } catch (e) {
+    } catch (_) {
       setState(() {
         if (isCurrentlyFollowing) _followingIds.add(targetUserId);
         else _followingIds.remove(targetUserId);
@@ -734,7 +739,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
 }
 
 // ---------------------------------------------------------------------------
-// TAB 2: RECORD SCREEN (WITH SMART AUTO-PAUSE)
+// TAB 2: RECORD & TURN-BY-TURN NAVIGATION SCREEN
 // ---------------------------------------------------------------------------
 class RecordScreen extends StatefulWidget {
   final Map<String, dynamic>? trekToFollow;
@@ -752,6 +757,11 @@ class _RecordScreenState extends State<RecordScreen> {
   bool _isTracking = false;
   bool _isPaused = false; 
   bool _isAddingPuck = false;
+  
+  // Custom Bottom Sheet Layout States
+  double _activeSheetHeight = 0.0;
+  Widget? _activeSheetContent;
+
   bool _isDownloadingMap = false; 
   double _downloadProgress = 0.0; 
   
@@ -761,16 +771,24 @@ class _RecordScreenState extends State<RecordScreen> {
   bool _isAmoledMode = false;
   final List<Map<String, dynamic>> _waypoints = [];
   
-  // --- NEW: AUTO-PAUSE VARIABLES ---
+  // Auto-pause variables
   bool _isAutoPaused = false;
   Timer? _stopTimer;
   final double _stopSpeedThresholdMs = 0.22; // ~0.8 km/h
-  final int _stopDurationSeconds = 12; // Wait 12s before auto-pausing
+  final int _stopDurationSeconds = 12;
 
   final Stopwatch _stopwatch = Stopwatch();
   Timer? _ticker;
   double _liveDistanceKm = 0.0;
   double _liveElevationGain = 0.0;
+
+  // Turn-By-Turn Navigation States
+  int _closestGuideIndex = 0;
+  double _distanceToNextManeuver = 0.0;
+  String _maneuverInstruction = "Continue along trail";
+  IconData _maneuverIcon = Icons.straight;
+  double _remainingGuideDistanceM = 0.0;
+  bool _isCameraLocked = true;
 
   Circle? _currentPuck;
   Circle? _startPuck;
@@ -800,18 +818,53 @@ class _RecordScreenState extends State<RecordScreen> {
   void dispose() {
     _positionStreamSub?.cancel();
     _ticker?.cancel();
-    _stopTimer?.cancel(); // Cancel to prevent memory leaks
+    _stopTimer?.cancel();
     super.dispose();
+  }
+
+  // Helper for dynamic bottom sheets
+  void _showInlineSheet(Widget content, double height) {
+    setState(() {
+      _activeSheetContent = content;
+      _activeSheetHeight = height;
+    });
+  }
+
+  void _hideInlineSheet() {
+    setState(() {
+      _activeSheetHeight = 0.0;
+      Future.delayed(const Duration(milliseconds: 250), () {
+        if (_activeSheetHeight == 0 && mounted) {
+          setState(() => _activeSheetContent = null);
+        }
+      });
+    });
   }
 
   Future<void> _checkLocationPermission() async {
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
-      if (mounted) showDialog(context: context, builder: (ctx) => AlertDialog(backgroundColor: const Color(0xFF1B1E28), title: const Text('GPS is Disabled', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), content: const Text('Please turn on GPS in your settings.', style: TextStyle(color: Colors.grey)), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')), ElevatedButton(onPressed: () async { Navigator.pop(ctx); await Geolocator.openLocationSettings(); }, child: const Text('Turn On'))]));
+      if (mounted) {
+        showDialog(
+          context: context, 
+          builder: (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF1B1E28), 
+            title: const Text('GPS is Disabled', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), 
+            content: const Text('Please turn on GPS in your settings.', style: TextStyle(color: Colors.grey)), 
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')), 
+              ElevatedButton(onPressed: () async { Navigator.pop(ctx); await Geolocator.openLocationSettings(); }, child: const Text('Turn On'))
+            ]
+          )
+        );
+      }
       return; 
     }
     LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) { permission = await Geolocator.requestPermission(); if (permission == LocationPermission.denied) return; }
+    if (permission == LocationPermission.denied) { 
+      permission = await Geolocator.requestPermission(); 
+      if (permission == LocationPermission.denied) return; 
+    }
     if (permission == LocationPermission.deniedForever) return;
     await _fetchInitialPosition();
     if (_positionStreamSub == null) _startLocationUpdates();
@@ -825,23 +878,113 @@ class _RecordScreenState extends State<RecordScreen> {
         _updatePucksOnMap(initialPosition);
         mapController!.animateCamera(CameraUpdate.newLatLngZoom(LatLng(initialPosition.latitude, initialPosition.longitude), 16.0));
       }
-    } catch (e) {}
+    } catch (_) {}
   }
 
-  double _distanceToGuideRoute(Position pos) {
-    if (_guidedTrekPoints.isEmpty) return 0.0;
+  // -------------------------------------------------------------------------
+  // TURN-BY-TURN CALCULATION ENGINE
+  // -------------------------------------------------------------------------
+  double _calculateBearing(LatLng p1, LatLng p2) {
+    final lat1 = p1.latitude * math.pi / 180;
+    final lon1 = p1.longitude * math.pi / 180;
+    final lat2 = p2.latitude * math.pi / 180;
+    final lon2 = p2.longitude * math.pi / 180;
+    final dLon = lon2 - lon1;
+    final y = math.sin(dLon) * math.cos(lat2);
+    final x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLon);
+    final radians = math.atan2(y, x);
+    return (radians * 180 / math.pi + 360) % 360;
+  }
+
+  void _calculateTurnByTurn(Position pos) {
+    if (_guidedTrekPoints.length < 2) return;
+
+    int closestIdx = 0;
     double minDistance = double.infinity;
-    for (final point in _guidedTrekPoints) {
-      final d = Geolocator.distanceBetween(pos.latitude, pos.longitude, point.latitude, point.longitude);
-      if (d < minDistance) minDistance = d;
+    for (int i = 0; i < _guidedTrekPoints.length; i++) {
+      final d = Geolocator.distanceBetween(
+        pos.latitude, pos.longitude, 
+        _guidedTrekPoints[i].latitude, _guidedTrekPoints[i].longitude
+      );
+      if (d < minDistance) {
+        minDistance = d;
+        closestIdx = i;
+      }
     }
-    return minDistance;
+    _closestGuideIndex = closestIdx;
+
+    double remaining = 0.0;
+    for (int i = closestIdx; i < _guidedTrekPoints.length - 1; i++) {
+      remaining += Geolocator.distanceBetween(
+        _guidedTrekPoints[i].latitude, _guidedTrekPoints[i].longitude, 
+        _guidedTrekPoints[i + 1].latitude, _guidedTrekPoints[i + 1].longitude
+      );
+    }
+    _remainingGuideDistanceM = remaining;
+
+    if (closestIdx >= _guidedTrekPoints.length - 2 || remaining < 25.0) {
+      setState(() {
+        _maneuverIcon = Icons.flag_rounded;
+        _distanceToNextManeuver = remaining;
+        _maneuverInstruction = "Destination reached!";
+      });
+      return;
+    }
+
+    double distToTurn = 0.0;
+    IconData detectedIcon = Icons.straight;
+    String detectedText = "Continue straight on trail";
+    bool turnFound = false;
+
+    for (int i = closestIdx; i < _guidedTrekPoints.length - 2; i++) {
+      distToTurn += Geolocator.distanceBetween(
+        _guidedTrekPoints[i].latitude, _guidedTrekPoints[i].longitude, 
+        _guidedTrekPoints[i + 1].latitude, _guidedTrekPoints[i + 1].longitude
+      );
+
+      final bearingCurrent = _calculateBearing(_guidedTrekPoints[i], _guidedTrekPoints[i + 1]);
+      final bearingNext = _calculateBearing(_guidedTrekPoints[i + 1], _guidedTrekPoints[i + 2]);
+      double diff = (bearingNext - bearingCurrent + 540) % 360 - 180;
+
+      if (diff.abs() > 35) {
+        turnFound = true;
+        if (diff > 65) {
+          detectedIcon = Icons.turn_sharp_right;
+          detectedText = "Sharp right bend";
+        } else if (diff > 35) {
+          detectedIcon = Icons.turn_right;
+          detectedText = "Turn right ahead";
+        } else if (diff < -65) {
+          detectedIcon = Icons.turn_sharp_left;
+          detectedText = "Sharp left bend";
+        } else {
+          detectedIcon = Icons.turn_left;
+          detectedText = "Turn left ahead";
+        }
+        break;
+      }
+      if (distToTurn > 1500) break; // Look ahead up to 1.5 km
+    }
+
+    setState(() {
+      _distanceToNextManeuver = turnFound ? distToTurn : remaining;
+      _maneuverIcon = turnFound ? detectedIcon : Icons.straight;
+      _maneuverInstruction = turnFound ? detectedText : "Follow trail to destination";
+    });
   }
 
   void _startLocationUpdates() {
     late LocationSettings locationSettings;
     if (Platform.isAndroid) {
-      locationSettings = AndroidSettings(accuracy: LocationAccuracy.best, distanceFilter: 3, foregroundNotificationConfig: const ForegroundNotificationConfig(notificationText: "Tracking active", notificationTitle: "Xplore", enableWakeLock: true));
+      locationSettings = AndroidSettings(
+        accuracy: LocationAccuracy.best, 
+        distanceFilter: 3, 
+        foregroundNotificationConfig: const ForegroundNotificationConfig(
+          notificationText: "Turn-by-turn navigation active", 
+          notificationTitle: "Xplore Navigation", 
+          enableWakeLock: true
+        )
+      );
     } else {
       locationSettings = const LocationSettings(accuracy: LocationAccuracy.best, distanceFilter: 3);
     }
@@ -850,9 +993,8 @@ class _RecordScreenState extends State<RecordScreen> {
       setState(() => _currentPosition = pos);
       
       if (_isTracking && !_isPaused) {
-        if (pos.accuracy > 15.0) return; 
+        if (pos.accuracy > 18.0) return; 
 
-        // --- NEW: SMART AUTO-PAUSE LOGIC ---
         if (pos.speed < _stopSpeedThresholdMs) {
           if (_stopTimer == null && !_isAutoPaused) {
             _stopTimer = Timer(Duration(seconds: _stopDurationSeconds), () {
@@ -874,12 +1016,10 @@ class _RecordScreenState extends State<RecordScreen> {
               _stopwatch.start();
               HapticFeedback.mediumImpact();
             });
-             if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Auto-Resumed!'), backgroundColor: Colors.green, duration: Duration(seconds: 2)));
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Auto-Resumed!'), backgroundColor: Colors.green, duration: Duration(seconds: 2)));
           }
         }
-        // --- END AUTO-PAUSE LOGIC ---
 
-        // Only record path data if NOT auto-paused
         if (!_isAutoPaused) {
           _offlineTrekData.add(pos);
           _liveRoutePoints.add(LatLng(pos.latitude, pos.longitude));
@@ -888,7 +1028,13 @@ class _RecordScreenState extends State<RecordScreen> {
           if (!_isAmoledMode) _updateLiveRoute();
 
           if (_guidedTrekPoints.isNotEmpty) {
-            double distFromPath = _distanceToGuideRoute(pos);
+            _calculateTurnByTurn(pos);
+            
+            double distFromPath = Geolocator.distanceBetween(
+              pos.latitude, pos.longitude, 
+              _guidedTrekPoints[_closestGuideIndex].latitude, 
+              _guidedTrekPoints[_closestGuideIndex].longitude
+            );
             bool currentlyOffRoute = distFromPath > 40.0;
             if (currentlyOffRoute && !_isOffRoute) HapticFeedback.heavyImpact(); 
             setState(() => _isOffRoute = currentlyOffRoute);
@@ -896,7 +1042,21 @@ class _RecordScreenState extends State<RecordScreen> {
         }
       }
       
-      if (!_isAmoledMode) _updatePucksOnMap(pos);
+      if (!_isAmoledMode) {
+        _updatePucksOnMap(pos);
+        if (_isCameraLocked && mapController != null) {
+          mapController!.animateCamera(
+            CameraUpdate.newCameraPosition(
+              CameraPosition(
+                target: LatLng(pos.latitude, pos.longitude), 
+                zoom: 17.5,
+                bearing: pos.heading >= 0 ? pos.heading : 0.0,
+                tilt: 45.0,
+              )
+            )
+          );
+        }
+      }
     });
   }
 
@@ -919,17 +1079,19 @@ class _RecordScreenState extends State<RecordScreen> {
     return gain;
   }
   
+  // FIX: Corridor Method rendering for the live route (thin neon line on white stroke)
   Future<void> _updateLiveRoute() async {
     if (mapController == null || _liveRoutePoints.length < 2) return;
     if (_routeBorder == null || _routeLine == null) {
-      _routeBorder = await mapController!.addLine(LineOptions(geometry: _liveRoutePoints, lineColor: '#FFFFFF', lineWidth: 9.0, lineJoin: 'round'));
-      _routeLine = await mapController!.addLine(LineOptions(geometry: _liveRoutePoints, lineColor: '#FC4C02', lineWidth: 5.0, lineJoin: 'round'));
+      _routeBorder = await mapController!.addLine(LineOptions(geometry: _liveRoutePoints, lineColor: '#FFFFFF', lineWidth: 5.0, lineJoin: 'round'));
+      _routeLine = await mapController!.addLine(LineOptions(geometry: _liveRoutePoints, lineColor: '#FF3D00', lineWidth: 3.0, lineJoin: 'round'));
     } else {
       await mapController!.updateLine(_routeBorder!, LineOptions(geometry: _liveRoutePoints));
       await mapController!.updateLine(_routeLine!, LineOptions(geometry: _liveRoutePoints));
     }
   }
 
+  // FIX: Corridor Method rendering for the guided route (thick, muted pathway)
   Future<void> _loadGuidedTrek(Map<String, dynamic> trek) async {
     try {
       final geoJson = jsonDecode(trek['route_geojson']);
@@ -941,12 +1103,12 @@ class _RecordScreenState extends State<RecordScreen> {
         if (_guideLine != null) await mapController!.removeLine(_guideLine!);
         if (_guidePuck != null) await mapController!.removeCircle(_guidePuck!);
 
-        _guideLine = await mapController!.addLine(LineOptions(geometry: _guidedTrekPoints, lineColor: '#00E5FF', lineWidth: 6.0, lineJoin: 'round'));
+        _guideLine = await mapController!.addLine(LineOptions(geometry: _guidedTrekPoints, lineColor: '#1A237E', lineWidth: 8.0, lineOpacity: 0.4, lineJoin: 'round'));
         _guidePuck = await mapController!.addCircle(CircleOptions(geometry: _guidedTrekPoints.first, circleRadius: 9.0, circleColor: '#00E5FF', circleStrokeWidth: 3.0, circleStrokeColor: '#FFFFFF'));
 
-        mapController!.animateCamera(CameraUpdate.newLatLngZoom(_guidedTrekPoints.first, 15.0));
+        mapController!.animateCamera(CameraUpdate.newLatLngZoom(_guidedTrekPoints.first, 16.0));
       }
-    } catch (e) {}
+    } catch (_) {}
   }
 
   Future<void> _updatePucksOnMap(Position position) async {
@@ -1004,11 +1166,13 @@ class _RecordScreenState extends State<RecordScreen> {
       _liveDistanceKm = 0.0;
       _liveElevationGain = 0.0;
       _isOffRoute = false;
+      _isCameraLocked = true;
       _stopwatch.reset();
       _stopwatch.start();
     });
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => setState(() {}));
     if (widget.trekToFollow == null) _clearMapData();
+    else if (_currentPosition != null) _calculateTurnByTurn(_currentPosition!);
   }
 
   void _pauseTrek() { setState(() { _isPaused = true; _stopwatch.stop(); }); }
@@ -1023,7 +1187,7 @@ class _RecordScreenState extends State<RecordScreen> {
     try {
       await Supabase.instance.client.from('gps_tracks').insert(batchData);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved to private history!'), backgroundColor: Colors.teal));
-    } catch (e) {
+    } catch (_) {
       await OfflineSyncManager.savePending('private', batchData);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No Network. Saved locally. Will sync later!'), backgroundColor: Colors.orange));
     }
@@ -1046,7 +1210,7 @@ class _RecordScreenState extends State<RecordScreen> {
     try {
       await Supabase.instance.client.from('public_treks').insert(payload);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Published "$name" to Explore!'), backgroundColor: Colors.green));
-    } catch (e) {
+    } catch (_) {
       await OfflineSyncManager.savePending('public', payload);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No Network. Saved locally. Will sync later!'), backgroundColor: Colors.orange));
     }
@@ -1063,32 +1227,32 @@ class _RecordScreenState extends State<RecordScreen> {
 
   void _showSOSDialog() {
     if (_currentPosition == null) return;
+    _showInlineSheet(_buildSOSSheet(), 400.0);
+  }
+
+  Widget _buildSOSSheet() {
     final lat = _currentPosition!.latitude;
     final lng = _currentPosition!.longitude;
     final wgs84 = '${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}';
     final dms = '${_toDMS(lat, true)}  ${_toDMS(lng, false)}';
-    
     final smsBody = Uri.encodeComponent('EMERGENCY SOS: I need assistance. My last known GPS coordinates are:\n\nDecimal (WGS84):\n$wgs84\n\nDMS:\n$dms\n\nAltitude: ${_currentPosition!.altitude.toStringAsFixed(0)}m');
 
-    showModalBottomSheet(
-      context: context, backgroundColor: const Color(0xFF1B1E28), shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.emergency, color: Colors.redAccent, size: 48),
-            const SizedBox(height: 12),
-            const Text('Emergency Coordinates', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
-            const SizedBox(height: 16),
-            Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFF13151D), borderRadius: BorderRadius.circular(12)), child: Column(children: [Text('Decimal Degrees', style: TextStyle(color: Colors.grey[500], fontSize: 12)), const SizedBox(height: 4), Text(wgs84, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1))])),
-            const SizedBox(height: 12),
-            Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFF13151D), borderRadius: BorderRadius.circular(12)), child: Column(children: [Text('Degrees Minutes Seconds (DMS)', style: TextStyle(color: Colors.grey[500], fontSize: 12)), const SizedBox(height: 4), Text(dms, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1))])),
-            const SizedBox(height: 24),
-            SizedBox(width: double.infinity, height: 52, child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), icon: const Icon(Icons.sms, color: Colors.white), label: const Text('Send SOS via SMS', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)), onPressed: () async { final uri = Uri.parse('sms:?body=$smsBody'); if (await canLaunchUrl(uri)) await launchUrl(uri); if (mounted) Navigator.pop(ctx); })),
-            const SizedBox(height: 12),
-          ],
-        ),
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.emergency, color: Colors.redAccent, size: 48),
+          const SizedBox(height: 12),
+          const Text('Emergency Coordinates', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
+          const SizedBox(height: 16),
+          Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFF13151D), borderRadius: BorderRadius.circular(12)), child: Column(children: [Text('Decimal Degrees', style: TextStyle(color: Colors.grey[500], fontSize: 12)), const SizedBox(height: 4), Text(wgs84, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1))])),
+          const SizedBox(height: 12),
+          Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFF13151D), borderRadius: BorderRadius.circular(12)), child: Column(children: [Text('Degrees Minutes Seconds (DMS)', style: TextStyle(color: Colors.grey[500], fontSize: 12)), const SizedBox(height: 4), Text(dms, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1))])),
+          const SizedBox(height: 24),
+          SizedBox(width: double.infinity, height: 52, child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), icon: const Icon(Icons.sms, color: Colors.white), label: const Text('Send SOS via SMS', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)), onPressed: () async { final uri = Uri.parse('sms:?body=$smsBody'); if (await canLaunchUrl(uri)) await launchUrl(uri); _hideInlineSheet(); })),
+          const SizedBox(height: 12),
+        ],
       ),
     );
   }
@@ -1117,45 +1281,53 @@ class _RecordScreenState extends State<RecordScreen> {
     );
   }
 
-  Future<void> _showOfflineDownloadDialog() async {
+  void _showOfflineDownloadDialog() {
     if (mapController == null) return;
-    showModalBottomSheet(
-      context: context, backgroundColor: const Color(0xFF1B1E28), shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            return Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.signal_cellular_connected_no_internet_4_bar, size: 48, color: Color(0xFF007AFF)),
-                  const SizedBox(height: 16),
-                  const Text('Save Area for Offline', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
-                  const SizedBox(height: 8),
-                  const Text('Download the currently visible map area. Navigate this trail deep in the wilderness without cell service.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 14)),
-                  const SizedBox(height: 24),
-                  if (_isDownloadingMap) ...[
-                    LinearProgressIndicator(value: _downloadProgress, backgroundColor: const Color(0xFF161922), color: const Color(0xFF00C853), minHeight: 8, borderRadius: BorderRadius.circular(4)),
-                    const SizedBox(height: 12),
-                    Text('${(_downloadProgress * 100).toStringAsFixed(0)}% Downloaded', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                  ] else ...[
-                    SizedBox(width: double.infinity, height: 52, child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF007AFF), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), icon: const Icon(Icons.download, color: Colors.white), label: const Text('Download Map (~15 MB)', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)), onPressed: () async { setSheetState(() => _isDownloadingMap = true); await _executeOfflineDownload(setSheetState); if (mounted) Navigator.pop(ctx); if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Offline map saved successfully!'), backgroundColor: Color(0xFF00C853))); }))
-                  ],
-                  const SizedBox(height: 12),
-                ],
-              ),
-            );
-          },
-        );
-      },
+    _showInlineSheet(_buildOfflineDownloadSheet(), 280.0);
+  }
+
+  Widget _buildOfflineDownloadSheet() {
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.signal_cellular_connected_no_internet_4_bar, size: 48, color: Color(0xFF007AFF)),
+          const SizedBox(height: 16),
+          const Text('Save Area for Offline', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white)),
+          const SizedBox(height: 8),
+          const Text('Download the currently visible map area. Navigate this trail deep in the wilderness without cell service.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 14)),
+          const SizedBox(height: 24),
+          if (_isDownloadingMap) ...[
+            LinearProgressIndicator(value: _downloadProgress, backgroundColor: const Color(0xFF161922), color: const Color(0xFF00C853), minHeight: 8, borderRadius: BorderRadius.circular(4)),
+            const SizedBox(height: 12),
+            Text('${(_downloadProgress * 100).toStringAsFixed(0)}% Downloaded', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ] else ...[
+            SizedBox(
+              width: double.infinity, height: 52, 
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF007AFF), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), 
+                icon: const Icon(Icons.download, color: Colors.white), 
+                label: const Text('Download Map (~15 MB)', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)), 
+                onPressed: () async { 
+                  setState(() => _isDownloadingMap = true); 
+                  await _executeOfflineDownload(); 
+                  _hideInlineSheet(); 
+                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Offline map saved successfully!'), backgroundColor: Color(0xFF00C853))); 
+                }
+              )
+            )
+          ],
+          const SizedBox(height: 12),
+        ],
+      ),
     );
   }
 
-  Future<void> _executeOfflineDownload(Function setSheetState) async {
+  Future<void> _executeOfflineDownload() async {
     for (int i = 0; i <= 100; i += 5) {
       await Future.delayed(const Duration(milliseconds: 150));
-      if (mounted) setSheetState(() => _downloadProgress = i / 100.0);
+      if (mounted) setState(() => _downloadProgress = i / 100.0);
     }
     if (mounted) setState(() { _isDownloadingMap = false; _downloadProgress = 0.0; });
   }
@@ -1199,8 +1371,38 @@ class _RecordScreenState extends State<RecordScreen> {
     return '${twoDigits(d.inMinutes.remainder(60))}:${twoDigits(d.inSeconds.remainder(60))}';
   }
 
+  String _formatManeuverDistance(double meters) {
+    if (meters < 1000) return '${meters.toStringAsFixed(0)} m';
+    return '${(meters / 1000).toStringAsFixed(1)} km';
+  }
+
+  String _calculateETAString() {
+    double speedMps = _currentPosition?.speed ?? 0.0;
+    if (speedMps < 0.8) speedMps = 1.15; 
+    final remainingSeconds = (_remainingGuideDistanceM / speedMps).round();
+    final etaTime = DateTime.now().add(Duration(seconds: remainingSeconds));
+    final minuteStr = etaTime.minute.toString().padLeft(2, '0');
+    final period = etaTime.hour >= 12 ? 'PM' : 'AM';
+    final hour12 = etaTime.hour == 0 ? 12 : (etaTime.hour > 12 ? etaTime.hour - 12 : etaTime.hour);
+    return '$hour12:$minuteStr $period';
+  }
+
+  String _calculateRemainingDurationString() {
+    double speedMps = _currentPosition?.speed ?? 0.0;
+    if (speedMps < 0.8) speedMps = 1.15;
+    final totalMinutes = (_remainingGuideDistanceM / (speedMps * 60)).round();
+    if (totalMinutes >= 60) {
+      final hours = totalMinutes ~/ 60;
+      final mins = totalMinutes % 60;
+      return '$hours hr $mins min';
+    }
+    return '$totalMinutes min';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final isFollowingRoute = widget.trekToFollow != null && _guidedTrekPoints.isNotEmpty;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -1208,54 +1410,306 @@ class _RecordScreenState extends State<RecordScreen> {
           Offstage(
             offstage: _isAmoledMode,
             child: MapLibreMap(
-              onMapCreated: (c) { mapController = c; if (_currentPosition != null) _fetchInitialPosition(); },
+              onMapCreated: (c) { 
+                mapController = c; 
+                if (widget.trekToFollow != null) _loadGuidedTrek(widget.trekToFollow!);
+                if (_currentPosition != null) _fetchInitialPosition(); 
+              },
               styleString: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-              initialCameraPosition: const CameraPosition(target: LatLng(12.3051, 76.6551), zoom: 15.0),
-              myLocationEnabled: false, compassEnabled: false,
+              initialCameraPosition: const CameraPosition(target: LatLng(12.3051, 76.6551), zoom: 16.0),
+              myLocationEnabled: false, 
+              compassEnabled: false,
+              onCameraTrackingDismissed: () => setState(() => _isCameraLocked = false),
             ),
           ),
           
           if (_isAmoledMode)
             const Center(child: Column(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.battery_saver, color: Color(0xFF00C853), size: 48), SizedBox(height: 12), Text('AMOLED SAVER ACTIVE', style: TextStyle(color: Color(0xFF00C853), fontWeight: FontWeight.bold, letterSpacing: 2))])),
 
-          if (!_isAmoledMode)
+          // -----------------------------------------------------------------
+          // 1. TOP TURN-BY-TURN NAVIGATION BANNER (Google Maps Style)
+          // -----------------------------------------------------------------
+          if (!_isAmoledMode && _isTracking && isFollowingRoute)
+            Positioned(
+              top: 0, left: 0, right: 0,
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14.0, vertical: 8.0),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 18.0, vertical: 16.0),
+                    decoration: BoxDecoration(
+                      color: _isOffRoute ? const Color(0xFFD32F2F) : const Color(0xFF0F9D58),
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: const [
+                        BoxShadow(color: Colors.black38, blurRadius: 10, offset: Offset(0, 4)),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.2),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(_isOffRoute ? Icons.warning_amber_rounded : _maneuverIcon, color: Colors.white, size: 36),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                _isOffRoute ? "OFF TRAIL ROUTE" : _formatManeuverDistance(_distanceToNextManeuver),
+                                style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w900, letterSpacing: -0.5),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                _isOffRoute ? "Head back toward the highlighted trail" : _maneuverInstruction,
+                                style: const TextStyle(color: Colors.white70, fontSize: 15, fontWeight: FontWeight.w600),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+          // Regular SOS Button (When not following or idle)
+          if (!_isAmoledMode && (!_isTracking || !isFollowingRoute))
             Positioned(top: 50, left: 16, child: _buildCircularButton(Icons.sos, _showSOSDialog, bgColor: Colors.redAccent)),
 
-          Positioned(
-            top: 50, right: 16,
+          // -----------------------------------------------------------------
+          // 2. BOTTOM CARDS (Google Maps Navigation Panel or Recorder HUD)
+          // -----------------------------------------------------------------
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOutCubic,
+            bottom: _activeSheetHeight > 0 ? -250 : 0, // Slide away when a custom sheet opens
+            left: 0, right: 0, 
+            child: _isTracking 
+              ? (isFollowingRoute ? _buildGoogleMapsNavigationHUD() : _buildActiveHUD()) 
+              : _buildIdleStartCard()
+          ),
+
+          // -----------------------------------------------------------------
+          // 3. FLOATING ACTION CONTROLS (Right Rail) - DYNAMIC GLIDING
+          // -----------------------------------------------------------------
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOutCubic,
+            // Slide exactly above the custom bottom sheet if it is open!
+            bottom: _activeSheetHeight > 0 
+                ? _activeSheetHeight + 16.0 
+                : (_isTracking ? 180 : 100), 
+            right: 16,
             child: Column(
               children: [
                 if (!_isAmoledMode && _isTracking)
                   Padding(padding: const EdgeInsets.only(bottom: 12.0), child: _buildCircularButton(Icons.add_location_alt, _showWaypointDialog, bgColor: const Color(0xFF007AFF))),
                 if (!_isAmoledMode)
                   Padding(padding: const EdgeInsets.only(bottom: 12.0), child: _buildCircularButton(Icons.cloud_download_outlined, _showOfflineDownloadDialog)),
+                
                 if (!_isAmoledMode)
-                  Padding(padding: const EdgeInsets.only(bottom: 12.0), child: _buildCircularButton(Icons.my_location, _checkLocationPermission)),
-                if (widget.trekToFollow != null && !_isAmoledMode)
-                  Padding(padding: const EdgeInsets.only(bottom: 12.0), child: _buildCircularButton(Icons.alt_route, () => _loadGuidedTrek(widget.trekToFollow!))),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12.0), 
+                    child: _buildCircularButton(
+                      _isCameraLocked ? Icons.navigation_rounded : Icons.my_location, 
+                      () {
+                        setState(() => _isCameraLocked = true);
+                        if (_currentPosition != null && mapController != null) {
+                          mapController!.animateCamera(
+                            CameraUpdate.newCameraPosition(
+                              CameraPosition(
+                                target: LatLng(_currentPosition!.latitude, _currentPosition!.longitude), 
+                                zoom: 17.5,
+                                bearing: _currentPosition!.heading >= 0 ? _currentPosition!.heading : 0.0,
+                                tilt: 45.0,
+                              )
+                            )
+                          );
+                        }
+                      },
+                      bgColor: _isCameraLocked ? const Color(0xFF007AFF) : const Color(0xFF1B1E28),
+                    )
+                  ),
+                
                 if (_isTracking)
-                  _buildCircularButton(_isAmoledMode ? Icons.light_mode : Icons.dark_mode, () { setState(() => _isAmoledMode = !_isAmoledMode); if (!_isAmoledMode && _currentPosition != null) { _updateLiveRoute(); _updatePucksOnMap(_currentPosition!); } }),
+                  _buildCircularButton(
+                    _isAmoledMode ? Icons.light_mode : Icons.dark_mode, 
+                    () { 
+                      setState(() => _isAmoledMode = !_isAmoledMode); 
+                      if (!_isAmoledMode && _currentPosition != null) { 
+                        _updateLiveRoute(); 
+                        _updatePucksOnMap(_currentPosition!); 
+                      } 
+                    }
+                  ),
               ],
             ),
           ),
-          
-          if (_isTracking && _isOffRoute)
-            Positioned(top: 50, left: _isAmoledMode ? 16 : 72, right: 72, child: Container(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(16), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 8, offset: const Offset(0, 4))]), child: const Row(children: [Icon(Icons.warning_amber_rounded, color: Colors.white, size: 24), SizedBox(width: 12), Expanded(child: Text("OFF ROUTE! Check map.", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)))]))),
 
-          Positioned(bottom: 0, left: 0, right: 0, child: _isTracking ? _buildActiveHUD() : _buildIdleStartCard()),
+          // -----------------------------------------------------------------
+          // 4. INLINE DYNAMIC BOTTOM SHEETS (SOS / Offline Download)
+          // -----------------------------------------------------------------
+          if (_activeSheetHeight > 0)
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: _hideInlineSheet,
+                child: Container(color: Colors.black.withValues(alpha: 0.5)),
+              )
+            ),
+
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOutCubic,
+            bottom: _activeSheetHeight > 0 ? 0 : -_activeSheetHeight - 100, // Slide up natively
+            left: 0, right: 0,
+            height: _activeSheetHeight > 0 ? _activeSheetHeight : 1, 
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Color(0xFF1B1E28),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                boxShadow: [BoxShadow(color: Colors.black54, blurRadius: 10)],
+              ),
+              child: SingleChildScrollView(
+                physics: const NeverScrollableScrollPhysics(),
+                child: SizedBox(
+                  height: _activeSheetHeight,
+                  child: _activeSheetContent ?? const SizedBox(),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
   }
 
   Widget _buildCircularButton(IconData icon, VoidCallback onPressed, {Color bgColor = const Color(0xFF1B1E28)}) {
-    return Container(decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle), child: IconButton(icon: Icon(icon, color: Colors.white), onPressed: onPressed));
+    return Container(
+      decoration: BoxDecoration(
+        color: bgColor, 
+        shape: BoxShape.circle,
+        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 6, offset: Offset(0, 3))],
+      ), 
+      child: IconButton(icon: Icon(icon, color: Colors.white), onPressed: onPressed)
+    );
   }
 
   Widget _buildIdleStartCard() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20), decoration: const BoxDecoration(color: Color(0xFF13151D), borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-      child: SafeArea(top: false, child: Column(mainAxisSize: MainAxisSize.min, children: [if (widget.trekToFollow != null) Padding(padding: const EdgeInsets.only(bottom: 12.0), child: Text('Selected: ${widget.trekToFollow!['name']}', style: const TextStyle(color: Color(0xFF00E5FF), fontWeight: FontWeight.bold))), SizedBox(width: double.infinity, height: 56, child: ElevatedButton.icon(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF007AFF), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28))), icon: const Icon(Icons.play_arrow, color: Colors.white, size: 28), label: const Text('START TREK', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)), onPressed: _startTrek))])),
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20), 
+      decoration: const BoxDecoration(color: Color(0xFF13151D), borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      child: SafeArea(
+        top: false, 
+        child: Column(
+          mainAxisSize: MainAxisSize.min, 
+          children: [
+            if (widget.trekToFollow != null) 
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12.0), 
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.navigation_outlined, color: Color(0xFF00E5FF), size: 18),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text('Selected: ${widget.trekToFollow!['name']}', 
+                        style: const TextStyle(color: Color(0xFF00E5FF), fontWeight: FontWeight.bold),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                )
+              ), 
+            SizedBox(
+              width: double.infinity, 
+              height: 56, 
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF007AFF), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28))), 
+                icon: const Icon(Icons.play_arrow, color: Colors.white, size: 28), 
+                label: Text(widget.trekToFollow != null ? 'START NAVIGATION' : 'START TREK', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)), 
+                onPressed: _startTrek,
+              )
+            )
+          ]
+        )
+      ),
+    );
+  }
+
+  Widget _buildGoogleMapsNavigationHUD() {
+    return Container(
+      padding: const EdgeInsets.only(top: 16, left: 20, right: 20, bottom: 28),
+      decoration: BoxDecoration(
+        color: _isAmoledMode ? Colors.black : const Color(0xFF161922),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+        boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 12, offset: Offset(0, -3))],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _calculateRemainingDurationString(),
+                      style: const TextStyle(color: Color(0xFF0F9D58), fontSize: 30, fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${(_remainingGuideDistanceM / 1000).toStringAsFixed(1)} km  •  ETA ${_calculateETAString()}',
+                      style: const TextStyle(color: Colors.white70, fontSize: 15, fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    IconButton(
+                      icon: Icon(_isPaused ? Icons.play_arrow_rounded : Icons.pause_rounded, color: Colors.orange, size: 34),
+                      onPressed: _isPaused ? _resumeTrek : _pauseTrek,
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.redAccent.withValues(alpha: 0.15),
+                        shape: BoxShape.circle,
+                      ),
+                      child: IconButton(
+                        icon: const Icon(Icons.close_rounded, color: Colors.redAccent, size: 28),
+                        onPressed: _finishTrek,
+                        tooltip: 'End Navigation',
+                      ),
+                    ),
+                  ],
+                )
+              ],
+            ),
+            const Divider(color: Colors.white12, height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _buildHUDMetric('RECORDED', '${_liveDistanceKm.toStringAsFixed(2)} KM'),
+                _buildHUDMetric('SPEED', '${((_currentPosition?.speed ?? 0) * 3.6).toStringAsFixed(1)} KM/H'),
+                _buildHUDMetric('TIME', _durationFormatted),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1391,7 +1845,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           _isLoading = false;
         });
       }
-    } catch (e) {
+    } catch (_) {
       if (mounted) setState(() => _isLoading = false);
     }
   }
@@ -1516,7 +1970,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
 // GPX PARSER HELPER
 // ---------------------------------------------------------------------------
 class GPXHelper {
-  
   static Future<void> exportAndShareTrek(Map<String, dynamic> trek) async {
     final geoJson = jsonDecode(trek['route_geojson']);
     final List coordinates = geoJson['coordinates'];

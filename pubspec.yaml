@@ -31,17 +31,17 @@ dependencies:
   flutter:
     sdk: flutter
 
-  cupertino_icons: ^1.0.8
+  cupertino_icons: ^2.0.0
   maplibre_gl: ^0.27.1
   geolocator: ^14.0.2
   supabase_flutter: ^2.18.0
   sqflite: ^2.3.0
   path: ^1.8.3
   url_launcher: ^6.3.3  
-  connectivity_plus: ^5.0.2
-  xml: ^6.3.0
-  file_picker: ^8.1.2
-  share_plus: ^10.1.0
+  connectivity_plus: ^7.3.1
+  xml: ^7.1.0
+  file_picker: ^8.3.7
+  share_plus: ^13.3.1
   path_provider: ^2.1.4
 
 dev_dependencies:
