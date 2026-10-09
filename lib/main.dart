@@ -21,6 +21,7 @@ Future<void> main() async {
   runApp(const XploreApp());
 }
 
+// Inside lib/main.dart
 class XploreApp extends StatelessWidget {
   const XploreApp({super.key});
 
@@ -33,7 +34,7 @@ class XploreApp extends StatelessWidget {
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF0F1115),
         colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF007AFF),
+          primary: Color(0xFFD4FF00), // <--- Change this line from Blue to Neon Yellow!
           secondary: Color(0xFFFC4C02),
           surface: Color(0xFF161922),
         ),
