@@ -4,11 +4,12 @@ plugins {
 }
 
 android {
-    namespace = "com.example.xplore_mobile"
+    namespace = "com.example.xplore_mobile" // Make sure this matches your package name
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true // Kotlin syntax requires 'is...Enabled = true'
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -36,4 +37,9 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Kotlin syntax requires parentheses and double quotes
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4") 
 }

@@ -30,6 +30,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_background_service: 5.1.0
+  flutter_local_notifications: ^17.0.1
 
   cupertino_icons: ^2.0.0
   maplibre_gl: ^0.27.1
@@ -40,9 +42,12 @@ dependencies:
   url_launcher: ^6.3.3  
   connectivity_plus: ^7.3.1
   xml: ^7.1.0
-  file_picker: ^8.3.7
+  file_picker: 13.1.0
   share_plus: ^13.3.1
   path_provider: ^2.1.4
+  image_picker: ^1.2.4
+  shared_preferences: ^2.5.6
+
 
 dev_dependencies:
   flutter_test:
