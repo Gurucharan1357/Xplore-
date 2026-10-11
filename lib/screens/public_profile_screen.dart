@@ -80,6 +80,86 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
     }
   }
 
+  // --- NEW: FETCH AND SHOW COMMUNITY LIST ---
+  void _showCommunityList(String title, bool isFollowers) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: cardSurface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.7, minChildSize: 0.5, maxChildSize: 0.95, expand: false,
+        builder: (_, scrollController) {
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Text(title, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+              ),
+              const Divider(color: Colors.white10, height: 1),
+              Expanded(
+                child: FutureBuilder<List<dynamic>>(
+                  future: _getCommunityUsers(isFollowers),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return const Center(child: CircularProgressIndicator(color: neonAccent));
+                    }
+                    final users = snapshot.data ?? [];
+                    if (users.isEmpty) {
+                      return Center(child: Text('No $title yet.', style: const TextStyle(color: Colors.grey)));
+                    }
+                    return ListView.builder(
+                      controller: scrollController,
+                      itemCount: users.length,
+                      itemBuilder: (context, index) {
+                        final u = users[index];
+                        final avatar = u['avatar_url'];
+                        return ListTile(
+                          leading: CircleAvatar(
+                            backgroundColor: neonAccent, 
+                            backgroundImage: avatar != null ? NetworkImage(avatar) : null,
+                            child: avatar == null ? const Icon(Icons.person, color: Colors.black) : null,
+                          ),
+                          title: Text(u['display_name'] ?? 'Athlete', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                          subtitle: Text(u['username'] != null ? '@${u['username']}' : '', style: const TextStyle(color: Colors.grey)),
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            // Push a new profile screen if they tap a user
+                            Navigator.push(context, MaterialPageRoute(builder: (_) => PublicProfileScreen(userId: u['id'])));
+                          },
+                        );
+                      }
+                    );
+                  }
+                ),
+              )
+            ],
+          );
+        }
+      )
+    );
+  }
+
+  Future<List<dynamic>> _getCommunityUsers(bool isFollowers) async {
+    final client = Supabase.instance.client;
+    // 1. Get the list of IDs
+    List<dynamic> followData = [];
+    if (isFollowers) {
+      followData = await client.from('follows').select('follower_id').eq('following_id', widget.userId);
+    } else {
+      followData = await client.from('follows').select('following_id').eq('follower_id', widget.userId);
+    }
+    
+    if (followData.isEmpty) return [];
+    
+    // 2. Extract just the ID strings
+    final ids = followData.map((e) => e[isFollowers ? 'follower_id' : 'following_id'].toString()).toList();
+    
+    // 3. Fetch the full profiles for those IDs
+    final profiles = await client.from('profiles').select().inFilter('id', ids);
+    return profiles;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -116,9 +196,16 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
                   ),
                   const SizedBox(height: 16),
                   Text(displayName, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 4),
-                  Text(username, style: const TextStyle(color: Colors.grey, fontSize: 14)),
-                  const SizedBox(height: 16),
+const SizedBox(height: 4),
+Text(username, style: const TextStyle(color: Colors.grey, fontSize: 14)),
+if (_userProfile?['bio'] != null && _userProfile!['bio'].toString().isNotEmpty) ...[
+  const SizedBox(height: 12),
+  Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 24.0),
+    child: Text(_userProfile!['bio'], textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70, fontSize: 14, height: 1.4)),
+  ),
+],
+const SizedBox(height: 16),
                   
                   if (!isMe)
                     SizedBox(
@@ -155,9 +242,9 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
 
             Row(
               children: [
-                Expanded(child: _buildCommunityPill('$_followersCount', 'Followers')),
+                Expanded(child: _buildCommunityPill('$_followersCount', 'Followers', () => _showCommunityList('Followers', true))),
                 const SizedBox(width: 16),
-                Expanded(child: _buildCommunityPill('$_followingCount', 'Following')),
+                Expanded(child: _buildCommunityPill('$_followingCount', 'Following', () => _showCommunityList('Following', false))),
               ],
             ),
             const SizedBox(height: 32),
@@ -195,11 +282,19 @@ class _PublicProfileScreenState extends State<PublicProfileScreen> {
     );
   }
 
-  Widget _buildCommunityPill(String number, String label) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      decoration: BoxDecoration(color: cardSurface, borderRadius: BorderRadius.circular(16)),
-      child: Column(children: [Text(number, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12))]),
+  // --- UPDATED: ADDED ONTAP PARAMETER ---
+  Widget _buildCommunityPill(String number, String label, VoidCallback onTap) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          decoration: BoxDecoration(color: cardSurface, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white10)),
+          child: Column(children: [Text(number, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12))]),
+        ),
+      ),
     );
   }
 
