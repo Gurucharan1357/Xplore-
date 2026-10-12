@@ -7,7 +7,9 @@ import 'dart:io';
 import 'package:image_picker/image_picker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:share_plus/share_plus.dart'; // NEW: Share package
 import 'package:xplore_mobile/main.dart'; 
+import 'package:xplore_mobile/screens/explore_screen.dart';
 
 const Color neonAccent = Color(0xFFD4FF00);
 const Color cardSurface = Color(0xFF161922);
@@ -25,8 +27,7 @@ class TrailDetailScreen extends StatefulWidget {
 
 class _TrailDetailScreenState extends State<TrailDetailScreen> {
   MapLibreMapController? _mapController;
-  bool _hasLiked = false;
-  int _likesCount = 0;
+  bool _isSaved = false; // Changed from _hasLiked
   List<dynamic> _comments = [];
   List<Map<String, dynamic>> _gallery = [];
   bool _isLoadingSocial = true;
@@ -47,9 +48,9 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
 
     final myId = Supabase.instance.client.auth.currentUser!.id;
     try {
-      final likesRes = await Supabase.instance.client.from('trek_likes').select('user_id').eq('trek_id', trekId);
-      _likesCount = likesRes.length;
-      _hasLiked = likesRes.any((like) => like['user_id'] == myId);
+      // NEW: Check the saved_treks table instead of trek_likes
+      final savedRes = await Supabase.instance.client.from('saved_treks').select('user_id').eq('trek_id', trekId);
+      _isSaved = savedRes.any((save) => save['user_id'] == myId);
 
       final commentsRes = await Supabase.instance.client.rpc('get_trek_comments', params: {'p_trek_id': trekId});
       
@@ -63,6 +64,44 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
       if (mounted) setState(() { _comments = commentsRes; _isLoadingSocial = false; });
     } catch(e) {
       if (mounted) setState(() => _isLoadingSocial = false);
+    }
+  }
+
+  // --- NEW: SHARE TRAIL METHOD ---
+  Future<void> _shareTrail() async {
+    final name = widget.trek['name'] ?? 'an awesome trail';
+    final distKm = widget.trek['distance_meters'] != null ? ((widget.trek['distance_meters'] as num) / 1000).toStringAsFixed(1) : '0.0';
+    final elevM = widget.trek['elevation_gain'] != null ? '${(widget.trek['elevation_gain'] as num).toStringAsFixed(0)}' : '0';
+    final difficulty = widget.trek['difficulty'] ?? 'Moderate';
+    final creator = widget.trek['creator_name'] ?? 'an athlete';
+
+    final shareText = 'Check out "$name" on Xplore!\n\n📏 Distance: $distKm km\n📈 Elevation: $elevM m\n⚡ Difficulty: $difficulty\n\nMapped by $creator.';
+
+    try {
+      await Share.share(shareText, subject: 'Xplore Trail: $name');
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to open share menu: $e'), backgroundColor: Colors.redAccent));
+    }
+  }
+
+  // --- NEW: SAVE/BOOKMARK METHOD ---
+  Future<void> _toggleSave() async {
+    if (widget.trek['id'] == 'imported_gpx') return;
+    final trekId = widget.trek['id'];
+    final myId = Supabase.instance.client.auth.currentUser!.id;
+    
+    HapticFeedback.lightImpact();
+    setState(() { _isSaved = !_isSaved; });
+    
+    try {
+      if (_isSaved) {
+        await Supabase.instance.client.from('saved_treks').insert({'trek_id': trekId, 'user_id': myId});
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Trail saved to your bookmarks!'), backgroundColor: Colors.green, duration: Duration(seconds: 2)));
+      } else {
+        await Supabase.instance.client.from('saved_treks').delete().eq('trek_id', trekId).eq('user_id', myId);
+      }
+    } catch(e) {
+      setState(() { _isSaved = !_isSaved; }); // Rollback UI if database fails
     }
   }
 
@@ -124,7 +163,10 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
 
   void _showImageOptions(Map<String, dynamic> imageObj) {
     final imageUrl = imageObj['image_url'];
-    final isUploader = imageObj['user_id'] == Supabase.instance.client.auth.currentUser?.id;
+    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+    
+    final isPhotoUploader = imageObj['user_id'] == currentUserId;
+    final isTrailOwner = widget.trek['creator_id'] == currentUserId;
 
     showDialog(
       context: context,
@@ -143,7 +185,7 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
               },
               child: SizedBox(
                 height: 250,
-                width: MediaQuery.of(context).size.width, // Fixes infinite width error
+                width: MediaQuery.of(context).size.width,
                 child: Image.network(imageUrl, fit: BoxFit.cover),
               ),
             ),
@@ -155,21 +197,24 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                 Navigator.push(context, MaterialPageRoute(builder: (_) => FullscreenImageViewer(imageUrl: imageUrl)));
               },
             ),
-            ListTile(
-              leading: const Icon(Icons.wallpaper, color: neonAccent),
-              title: const Text('Set as Trail Cover Photo', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-              onTap: () async {
-                Navigator.pop(ctx);
-                try {
-                  await Supabase.instance.client.from('public_treks').update({'image_url': imageUrl}).eq('id', widget.trek['id']);
-                  setState(() => widget.trek['image_url'] = imageUrl);
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cover photo updated!'), backgroundColor: Colors.green));
-                } catch(e) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to update cover.'), backgroundColor: Colors.redAccent));
-                }
-              },
-            ),
-            if (isUploader)
+            
+            if (isTrailOwner)
+              ListTile(
+                leading: const Icon(Icons.wallpaper, color: neonAccent),
+                title: const Text('Set as Trail Cover Photo', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    await Supabase.instance.client.from('public_treks').update({'image_url': imageUrl}).eq('id', widget.trek['id']);
+                    setState(() => widget.trek['image_url'] = imageUrl);
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cover photo updated!'), backgroundColor: Colors.green));
+                  } catch(e) {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to update cover.'), backgroundColor: Colors.redAccent));
+                  }
+                },
+              ),
+              
+            if (isPhotoUploader)
               ListTile(
                 leading: const Icon(Icons.delete_outline, color: Colors.redAccent),
                 title: const Text('Delete Photo', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
@@ -178,6 +223,7 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                   _deletePhoto(imageObj);
                 },
               ),
+              
             ListTile(
               leading: const Icon(Icons.close, color: Colors.grey),
               title: const Text('Cancel', style: TextStyle(color: Colors.grey)),
@@ -189,28 +235,104 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
     );
   }
 
-  Future<void> _exportGPX() async {
-    try {
-      await GPXHelper.exportAndShareTrek(widget.trek);
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to export GPX: $e'), backgroundColor: Colors.redAccent));
-    }
-  }
+  void _showEditTrailSheet() {
+    final nameCtrl = TextEditingController(text: widget.trek['name'] ?? '');
+    
+    // Extract existing tags and format them into a comma-separated string
+    List<dynamic> currentTags = widget.trek['tags'] ?? [];
+    final tagsCtrl = TextEditingController(text: currentTags.join(', '));
+    
+    bool isSaving = false;
 
-  Future<void> _toggleLike() async {
-    if (widget.trek['id'] == 'imported_gpx') return;
-    final trekId = widget.trek['id'];
-    final myId = Supabase.instance.client.auth.currentUser!.id;
-    
-    HapticFeedback.lightImpact();
-    setState(() { _hasLiked = !_hasLiked; _likesCount += _hasLiked ? 1 : -1; });
-    
-    try {
-      if (_hasLiked) await Supabase.instance.client.from('trek_likes').insert({'trek_id': trekId, 'user_id': myId});
-      else await Supabase.instance.client.from('trek_likes').delete().eq('trek_id', trekId).eq('user_id', myId);
-    } catch(e) {
-      setState(() { _hasLiked = !_hasLiked; _likesCount += _hasLiked ? 1 : -1; });
-    }
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: cardSurface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setSheetState) => Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, left: 24, right: 24, top: 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Edit Trail Details', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 24),
+              
+              const Text('Trail Name', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: nameCtrl,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  filled: true, fillColor: bgColor,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                ),
+              ),
+              const SizedBox(height: 20),
+              
+              const Text('Keywords & Hashtags (comma separated)', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: tagsCtrl,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  hintText: 'e.g. Mysore, Sunset, Muddy',
+                  hintStyle: const TextStyle(color: Colors.white30),
+                  filled: true, fillColor: bgColor,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                ),
+              ),
+              const SizedBox(height: 32),
+              
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: neonAccent, foregroundColor: Colors.black, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                  onPressed: isSaving ? null : () async {
+                    setSheetState(() => isSaving = true);
+                    try {
+                      // Process tags: Clean them to lowercase and remove manual '#'
+                      final rawTags = tagsCtrl.text.split(',');
+                      List<String> formattedTags = [];
+                      for (var t in rawTags) {
+                        String clean = t.trim().toLowerCase().replaceAll('#', '');
+                        if (clean.isNotEmpty) {
+                          formattedTags.add(clean);
+                        }
+                      }
+
+                      await Supabase.instance.client.from('public_treks').update({
+                        'name': nameCtrl.text.trim(),
+                        'tags': formattedTags,
+                      }).eq('id', widget.trek['id']);
+
+                      // Update local state immediately so UI refreshes
+                      setState(() {
+                        widget.trek['name'] = nameCtrl.text.trim();
+                        widget.trek['tags'] = formattedTags;
+                      });
+                      
+                      Navigator.pop(ctx);
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Trail updated successfully!'), backgroundColor: Colors.green));
+                    } catch (e) {
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to update: $e'), backgroundColor: Colors.redAccent));
+                    } finally {
+                      setSheetState(() => isSaving = false);
+                    }
+                  },
+                  child: isSaving 
+                    ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.black, strokeWidth: 2)) 
+                    : const Text('Save Changes', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                ),
+              ),
+              const SizedBox(height: 24),
+            ],
+          ),
+        )
+      )
+    );
   }
 
   Future<void> _submitComment() async {
@@ -309,6 +431,9 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
     final trailName = widget.trek['name'] ?? 'Unknown Trail';
     final difficulty = widget.trek['difficulty'] ?? 'Moderate';
     
+    final isTrailOwner = widget.trek['creator_id'] == Supabase.instance.client.auth.currentUser?.id;
+    final List<dynamic> currentTags = widget.trek['tags'] ?? [];
+    
     final distKm = widget.trek['distance_meters'] != null ? ((widget.trek['distance_meters'] as num) / 1000).toStringAsFixed(1) : '0.0';
     final elevation = widget.trek['elevation_gain'] != null ? '${(widget.trek['elevation_gain'] as num).toStringAsFixed(0)} m' : '0 m';
 
@@ -329,18 +454,24 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
               onPressed: () => Navigator.pop(context),
             ),
             actions: [
+              if (isTrailOwner)
+                IconButton(
+                  icon: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), shape: BoxShape.circle), child: const Icon(Icons.edit, color: Colors.white, size: 20)),
+                  onPressed: _showEditTrailSheet,
+                ),
+              // NEW SHARE BUTTON
               IconButton(
                 icon: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), shape: BoxShape.circle), child: const Icon(Icons.ios_share, color: Colors.white, size: 20)),
-                onPressed: _exportGPX,
+                onPressed: _shareTrail,
               ),
+              // NEW BOOKMARK/SAVE BUTTON
               IconButton(
-                icon: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), shape: BoxShape.circle), child: Icon(_hasLiked ? Icons.favorite : Icons.favorite_border, color: _hasLiked ? Colors.redAccent : Colors.white, size: 20)),
-                onPressed: _toggleLike,
+                icon: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), shape: BoxShape.circle), child: Icon(_isSaved ? Icons.bookmark : Icons.bookmark_border, color: _isSaved ? neonAccent : Colors.white, size: 20)),
+                onPressed: _toggleSave,
               ),
               const SizedBox(width: 8),
             ],
             flexibleSpace: FlexibleSpaceBar(
-              // Wrap the ENTIRE stack in a detector to prevent 0-size hit testing!
               background: GestureDetector(
                 onTap: () {
                   if (heroImageUrl.isNotEmpty) {
@@ -373,6 +504,21 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                       Container(margin: const EdgeInsets.only(left: 16, top: 4), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: BoxDecoration(color: difficulty.toUpperCase() == 'HARD' ? Colors.redAccent.withValues(alpha: 0.2) : neonAccent.withValues(alpha: 0.2), border: Border.all(color: difficulty.toUpperCase() == 'HARD' ? Colors.redAccent : neonAccent), borderRadius: BorderRadius.circular(12)), child: Text(difficulty.toUpperCase(), style: TextStyle(color: difficulty.toUpperCase() == 'HARD' ? Colors.redAccent : neonAccent, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1))),
                     ],
                   ),
+                  
+                  if (currentTags.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12.0),
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: currentTags.map((tag) => Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(color: cardSurface, border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(8)),
+                          child: Text('#$tag', style: const TextStyle(color: neonAccent, fontSize: 12, fontWeight: FontWeight.bold)),
+                        )).toList(),
+                      ),
+                    ),
+                  
                   const SizedBox(height: 16),
 
                   // CREATOR CARD
@@ -737,7 +883,6 @@ class FullscreenImageViewer extends StatelessWidget {
         panEnabled: true,
         minScale: 1.0,
         maxScale: 5.0,
-        // Using a strictly bounded container fixes the hit-test exception!
         child: Container(
           width: MediaQuery.of(context).size.width,
           height: MediaQuery.of(context).size.height,

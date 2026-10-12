@@ -5,9 +5,9 @@ import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:xplore_mobile/main.dart'; 
 import 'package:xplore_mobile/screens/trail_detail_screen.dart';
+import 'package:xplore_mobile/screens/public_profile_screen.dart'; 
 import 'package:url_launcher/url_launcher.dart';
-
-// Import the new offline sync manager
+import 'package:xplore_mobile/screens/saved_trails_screen.dart';
 import 'package:xplore_mobile/utils/offline_sync_manager.dart';
 
 const Color neonAccent = Color(0xFFD4FF00);
@@ -116,6 +116,114 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
       if (mounted) setState(() => _isLoading = false);
     }
   }
+
+  void _showCommunityList(String title, bool isFollowers) {
+    Future<List<dynamic>> usersFuture = _getCommunityUsers(isFollowers);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: cardSurface,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setSheetState) => DraggableScrollableSheet(
+          initialChildSize: 0.7, minChildSize: 0.5, maxChildSize: 0.95, expand: false,
+          builder: (_, scrollController) {
+            return Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Text(title, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                ),
+                const Divider(color: Colors.white10, height: 1),
+                Expanded(
+                  child: FutureBuilder<List<dynamic>>(
+                    future: usersFuture,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return const Center(child: CircularProgressIndicator(color: neonAccent));
+                      }
+                      final users = snapshot.data ?? [];
+                      if (users.isEmpty) {
+                        return Center(child: Text('No $title yet.', style: const TextStyle(color: Colors.grey)));
+                      }
+                      return ListView.builder(
+                        controller: scrollController,
+                        itemCount: users.length,
+                        itemBuilder: (context, index) {
+                          final u = users[index];
+                          final avatar = u['avatar_url'];
+                          return ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: neonAccent, 
+                              backgroundImage: avatar != null ? NetworkImage(avatar) : null,
+                              child: avatar == null ? const Icon(Icons.person, color: Colors.black) : null,
+                            ),
+                            title: Text(u['display_name'] ?? 'Athlete', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                            subtitle: Text(u['username'] != null ? '@${u['username']}' : '', style: const TextStyle(color: Colors.grey)),
+                            
+                            trailing: TextButton(
+                              style: TextButton.styleFrom(
+                                backgroundColor: Colors.redAccent.withValues(alpha: 0.1),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                                minimumSize: Size.zero,
+                              ),
+                              onPressed: () async {
+                                final myId = Supabase.instance.client.auth.currentUser!.id;
+                                try {
+                                  if (isFollowers) {
+                                    await Supabase.instance.client.from('follows').delete().eq('follower_id', u['id']).eq('following_id', myId);
+                                  } else {
+                                    await Supabase.instance.client.from('follows').delete().eq('follower_id', myId).eq('following_id', u['id']);
+                                  }
+                                  
+                                  setSheetState(() {
+                                    usersFuture = _getCommunityUsers(isFollowers);
+                                  });
+                                  _fetchDashboardData();
+                                  
+                                } catch (e) {
+                                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to update. Try again.'), backgroundColor: Colors.redAccent));
+                                }
+                              },
+                              child: Text(isFollowers ? 'Remove' : 'Unfollow', style: const TextStyle(color: Colors.redAccent, fontSize: 12, fontWeight: FontWeight.bold)),
+                            ),
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              Navigator.push(context, MaterialPageRoute(builder: (_) => PublicProfileScreen(userId: u['id'])));
+                            },
+                          );
+                        }
+                      );
+                    }
+                  ),
+                )
+              ],
+            );
+          }
+        )
+      )
+    );
+  }
+
+  Future<List<dynamic>> _getCommunityUsers(bool isFollowers) async {
+    final client = Supabase.instance.client;
+    final myId = client.auth.currentUser!.id;
+    
+    List<dynamic> followData = [];
+    if (isFollowers) {
+      followData = await client.from('follows').select('follower_id').eq('following_id', myId);
+    } else {
+      followData = await client.from('follows').select('following_id').eq('follower_id', myId);
+    }
+    
+    if (followData.isEmpty) return [];
+    
+    final ids = followData.map((e) => e[isFollowers ? 'follower_id' : 'following_id'].toString()).toList();
+    final profiles = await client.from('profiles').select().inFilter('id', ids);
+    return profiles;
+  }
   
   Future<void> _pickAndUploadAvatar() async {
     try {
@@ -156,12 +264,12 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
 
   Future<void> _triggerSync() async {
     setState(() => _isSyncing = true);
-    final syncedCount = await OfflineSyncManager.syncPending(); // Wired to the manager method
+    final syncedCount = await OfflineSyncManager.syncPending(); 
     
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(syncedCount > 0 ? 'Successfully synced $syncedCount treks!' : 'Network still unavailable.'), backgroundColor: syncedCount > 0 ? Colors.green : Colors.orange));
       setState(() => _isSyncing = false);
-      _fetchDashboardData(); // Refresh UI to clear the banner if successful
+      _fetchDashboardData(); 
     }
   }
 
@@ -187,27 +295,25 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
       builder: (ctx) => Center(
         child: GestureDetector(
           onTap: () => Navigator.pop(ctx),
-          child: InteractiveViewer(
-            panEnabled: true, minScale: 1.0, maxScale: 4.0,
-            child: Hero(
-              tag: 'avatar_hero', 
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(24), 
-                child: Image.network(
-                  avatarUrl, width: MediaQuery.of(context).size.width * 0.85, height: MediaQuery.of(context).size.width * 0.85, fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) => Container(width: MediaQuery.of(context).size.width * 0.85, height: MediaQuery.of(context).size.width * 0.85, color: cardSurface, child: const Icon(Icons.person, size: 100, color: Colors.grey)),
-                )
+          child: Hero(
+            tag: 'avatar_hero', 
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24), 
+              child: Image.network(
+                avatarUrl, width: MediaQuery.of(context).size.width * 0.85, height: MediaQuery.of(context).size.width * 0.85, fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => Container(width: MediaQuery.of(context).size.width * 0.85, height: MediaQuery.of(context).size.width * 0.85, color: cardSurface, child: const Icon(Icons.person, size: 100, color: Colors.grey)),
               )
-            ),
+            )
           ),
         ),
       ),
     );
   }
 
-  void _showEditProfileDialog() {
+ void _showEditProfileDialog() {
     final nameCtrl = TextEditingController(text: _userProfile?['display_name'] ?? '');
     final userCtrl = TextEditingController(text: _userProfile?['username'] ?? '');
+    final bioCtrl = TextEditingController(text: _userProfile?['bio'] ?? ''); 
 
     showDialog(
       context: context,
@@ -220,6 +326,15 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
             TextField(controller: nameCtrl, style: const TextStyle(color: Colors.white), decoration: const InputDecoration(labelText: 'Display Name', labelStyle: TextStyle(color: Colors.grey), focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: neonAccent)))),
             const SizedBox(height: 16),
             TextField(controller: userCtrl, style: const TextStyle(color: Colors.white), decoration: const InputDecoration(labelText: 'Username', prefixText: '@ ', labelStyle: TextStyle(color: Colors.grey), focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: neonAccent)))),
+            const SizedBox(height: 16),
+            TextField(
+              controller: bioCtrl, 
+              style: const TextStyle(color: Colors.white, fontSize: 14), 
+              maxLength: 150, 
+              maxLines: 3, 
+              minLines: 1,
+              decoration: const InputDecoration(labelText: 'Bio', labelStyle: TextStyle(color: Colors.grey), focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: neonAccent)), counterStyle: TextStyle(color: Colors.grey, fontSize: 10))
+            ),
           ],
         ),
         actions: [
@@ -228,7 +343,11 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
             style: ElevatedButton.styleFrom(backgroundColor: neonAccent, foregroundColor: Colors.black, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))), 
             onPressed: () async { 
               try { 
-                await Supabase.instance.client.from('profiles').update({'display_name': nameCtrl.text.trim(), 'username': userCtrl.text.trim()}).eq('id', Supabase.instance.client.auth.currentUser!.id); 
+                await Supabase.instance.client.from('profiles').update({
+                  'display_name': nameCtrl.text.trim(), 
+                  'username': userCtrl.text.trim(),
+                  'bio': bioCtrl.text.trim()
+                }).eq('id', Supabase.instance.client.auth.currentUser!.id); 
                 Navigator.pop(ctx); 
                 _fetchDashboardData(); 
               } catch (e) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Update failed: $e'))); } 
@@ -239,8 +358,8 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
       ),
     );
   }
-
-  void _showSettingsMenu() {
+  
+void _showSettingsMenu() {
     showModalBottomSheet(
       context: context, backgroundColor: cardSurface, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) => Padding(
@@ -250,6 +369,17 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
           children: [
             Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
             const SizedBox(height: 24),
+            
+            // NEW: SAVED TRAILS MENU BUTTON
+            ListTile(
+              leading: const Icon(Icons.bookmark, color: neonAccent), 
+              title: const Text('Saved Trails', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), 
+              onTap: () { 
+                Navigator.pop(ctx); 
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const SavedTrailsScreen())); 
+              }
+            ),
+            
             ListTile(leading: const Icon(Icons.settings, color: Colors.white), title: const Text('App Settings', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (_) => const AppSettingsScreen())); }),
             ListTile(leading: const Icon(Icons.download_for_offline, color: Colors.white), title: const Text('Manage Offline Maps', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (_) => const ManageOfflineMapsScreen())); }),
             ListTile(leading: const Icon(Icons.help_outline, color: Colors.white), title: const Text('Help & Support', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (_) => const HelpSupportScreen())); }),
@@ -289,50 +419,58 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Row(
-                    children: [
-                      Stack(
-                        children: [
-                          GestureDetector(
-                            onTap: () => _showProfileImagePopup(avatarUrl),
-                            child: Hero(
-                              tag: 'avatar_hero', 
-                              child: Container(
-                                padding: const EdgeInsets.all(2), decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: neonAccent, width: 2)), 
-                                child: CircleAvatar(radius: 34, backgroundColor: Colors.grey[800], backgroundImage: NetworkImage(avatarUrl), onBackgroundImageError: (e, s) => {})
-                              )
-                            ),
-                          ),
-                          Positioned(
-                            bottom: 0, right: 0,
-                            child: GestureDetector(
-                              onTap: _pickAndUploadAvatar,
-                              child: Container(
-                                padding: const EdgeInsets.all(6),
-                                decoration: BoxDecoration(color: neonAccent, shape: BoxShape.circle, border: Border.all(color: bgColor, width: 2)),
-                                child: const Icon(Icons.camera_alt, color: Colors.black, size: 14),
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Stack(
+                          children: [
+                            GestureDetector(
+                              onTap: () => _showProfileImagePopup(avatarUrl),
+                              child: Hero(
+                                tag: 'avatar_hero', 
+                                child: Container(
+                                  padding: const EdgeInsets.all(2), decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: neonAccent, width: 2)), 
+                                  child: CircleAvatar(radius: 34, backgroundColor: Colors.grey[800], backgroundImage: NetworkImage(avatarUrl), onBackgroundImageError: (e, s) => {})
+                                )
                               ),
                             ),
-                          )
-                        ],
-                      ),
-                      const SizedBox(width: 16),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('My Dashboard', style: TextStyle(color: Colors.grey, fontSize: 12, letterSpacing: 1)),
-                          const SizedBox(height: 2),
-                          Row(children: [Text(displayName, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)), const SizedBox(width: 8), GestureDetector(onTap: _showEditProfileDialog, child: const Icon(Icons.edit_square, color: neonAccent, size: 16))]),
-                          Text(username, style: TextStyle(color: neonAccent.withValues(alpha: 0.7), fontSize: 13)),
-                        ],
-                      ),
-                    ],
+                            Positioned(
+                              bottom: 0, right: 0,
+                              child: GestureDetector(
+                                onTap: _pickAndUploadAvatar,
+                                child: Container(
+                                  padding: const EdgeInsets.all(6),
+                                  decoration: BoxDecoration(color: neonAccent, shape: BoxShape.circle, border: Border.all(color: bgColor, width: 2)),
+                                  child: const Icon(Icons.camera_alt, color: Colors.black, size: 14),
+                                ),
+                              ),
+                            )
+                          ],
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('My Dashboard', style: TextStyle(color: Colors.grey, fontSize: 12, letterSpacing: 1)),
+                              const SizedBox(height: 2),
+                              Row(children: [Expanded(child: Text(displayName, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)), const SizedBox(width: 8), GestureDetector(onTap: _showEditProfileDialog, child: const Icon(Icons.edit_square, color: neonAccent, size: 16))]),
+                              Text(username, style: TextStyle(color: neonAccent.withValues(alpha: 0.7), fontSize: 13)),
+                              
+                              if (_userProfile?['bio'] != null && _userProfile!['bio'].toString().trim().isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                Text(_userProfile!['bio'], style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.4)),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                   GestureDetector(onTap: _showSettingsMenu, child: Container(padding: const EdgeInsets.all(10), decoration: const BoxDecoration(color: cardSurface, shape: BoxShape.circle), child: const Icon(Icons.menu, color: Colors.white, size: 22)))
                 ],
               ),
               
-              // Dynamic Batch Sync Banner
               if (_pendingSyncCount > 0)
                 Container(
                   margin: const EdgeInsets.only(top: 24, bottom: 8), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), 
@@ -377,9 +515,9 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
 
               Row(
                 children: [
-                  Expanded(child: _buildCommunityPill('$_followersCount', 'Followers')),
+                  Expanded(child: _buildCommunityPill('$_followersCount', 'Followers', () => _showCommunityList('Followers', true))),
                   const SizedBox(width: 16),
-                  Expanded(child: _buildCommunityPill('$_followingCount', 'Following')),
+                  Expanded(child: _buildCommunityPill('$_followingCount', 'Following', () => _showCommunityList('Following', false))),
                 ],
               ),
               const SizedBox(height: 32),
@@ -426,11 +564,18 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
     );
   }
 
-  Widget _buildCommunityPill(String number, String label) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      decoration: BoxDecoration(color: cardSurface, borderRadius: BorderRadius.circular(16)),
-      child: Column(children: [Text(number, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12))]),
+  Widget _buildCommunityPill(String number, String label, VoidCallback onTap) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          decoration: BoxDecoration(color: cardSurface, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white10)),
+          child: Column(children: [Text(number, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12))]),
+        ),
+      ),
     );
   }
 
@@ -450,6 +595,7 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
     );
   }
 
+  // --- UPDATED: REMOVED "EDIT" FROM POPUP MENU ---
   Widget _buildMyTrailCard(Map<String, dynamic> trek) {
     final distKm = ((trek['distance_meters'] ?? 0) / 1000).toStringAsFixed(1);
     final elevM = (trek['elevation_gain'] ?? 0).toStringAsFixed(0);
@@ -498,12 +644,9 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
                         } else if (value == 'Delete') {
                           await Supabase.instance.client.from('public_treks').delete().eq('id', trek['id']);
                           _fetchDashboardData();
-                        } else {
-                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Edit details coming soon!')));
                         }
                       },
                       itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-                        const PopupMenuItem<String>(value: 'Edit', child: Text('Edit Details', style: TextStyle(color: Colors.white))),
                         const PopupMenuItem<String>(value: 'Hide', child: Text('Hide from Profile', style: TextStyle(color: Colors.white))),
                         const PopupMenuDivider(height: 1),
                         const PopupMenuItem<String>(value: 'Delete', child: Text('Delete Trek', style: TextStyle(color: Colors.redAccent))),
