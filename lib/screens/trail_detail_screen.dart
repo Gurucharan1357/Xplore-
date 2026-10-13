@@ -7,9 +7,10 @@ import 'dart:io';
 import 'package:image_picker/image_picker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:share_plus/share_plus.dart'; // NEW: Share package
+import 'package:share_plus/share_plus.dart'; 
 import 'package:xplore_mobile/main.dart'; 
 import 'package:xplore_mobile/screens/explore_screen.dart';
+import 'package:xplore_mobile/screens/my_dashboard_screen.dart'; // Needed to access OfflineMapCache
 
 const Color neonAccent = Color(0xFFD4FF00);
 const Color cardSurface = Color(0xFF161922);
@@ -27,10 +28,11 @@ class TrailDetailScreen extends StatefulWidget {
 
 class _TrailDetailScreenState extends State<TrailDetailScreen> {
   MapLibreMapController? _mapController;
-  bool _isSaved = false; // Changed from _hasLiked
+  bool _isSaved = false; 
   List<dynamic> _comments = [];
   List<Map<String, dynamic>> _gallery = [];
   bool _isLoadingSocial = true;
+  bool _isDownloadingMap = false; // Tracks download state
   final _commentController = TextEditingController();
 
   @override
@@ -48,7 +50,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
 
     final myId = Supabase.instance.client.auth.currentUser!.id;
     try {
-      // NEW: Check the saved_treks table instead of trek_likes
       final savedRes = await Supabase.instance.client.from('saved_treks').select('user_id').eq('trek_id', trekId);
       _isSaved = savedRes.any((save) => save['user_id'] == myId);
 
@@ -67,7 +68,36 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
     }
   }
 
-  // --- NEW: SHARE TRAIL METHOD ---
+  // --- NEW: DOWNLOAD MAP CACHE ---
+  Future<void> _downloadMapRegion() async {
+    if (widget.trek['id'] == 'imported_gpx') return;
+    final trailName = widget.trek['name'] ?? 'Unknown Trail';
+    
+    // Check if it already exists in the cache
+    final exists = OfflineMapCache.downloadedMaps.any((m) => m['name'] == trailName);
+    if (exists) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Map for "$trailName" is already downloaded!'), backgroundColor: Colors.orange));
+      return;
+    }
+
+    setState(() => _isDownloadingMap = true);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Downloading offline map tiles for "$trailName"...'), backgroundColor: neonAccent, duration: const Duration(seconds: 2)));
+    
+    // Simulate the download latency for tile fetching
+    await Future.delayed(const Duration(seconds: 3));
+    
+    OfflineMapCache.downloadedMaps.add({
+      'name': trailName,
+      'size': '12.8 MB',
+      'date': 'Downloaded Just Now'
+    });
+    
+    if (mounted) {
+      setState(() => _isDownloadingMap = false);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Offline map saved successfully! View it in your Settings > Manage Offline Maps.'), backgroundColor: Colors.green));
+    }
+  }
+
   Future<void> _shareTrail() async {
     final name = widget.trek['name'] ?? 'an awesome trail';
     final distKm = widget.trek['distance_meters'] != null ? ((widget.trek['distance_meters'] as num) / 1000).toStringAsFixed(1) : '0.0';
@@ -84,7 +114,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
     }
   }
 
-  // --- NEW: SAVE/BOOKMARK METHOD ---
   Future<void> _toggleSave() async {
     if (widget.trek['id'] == 'imported_gpx') return;
     final trekId = widget.trek['id'];
@@ -101,7 +130,7 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
         await Supabase.instance.client.from('saved_treks').delete().eq('trek_id', trekId).eq('user_id', myId);
       }
     } catch(e) {
-      setState(() { _isSaved = !_isSaved; }); // Rollback UI if database fails
+      setState(() { _isSaved = !_isSaved; }); 
     }
   }
 
@@ -237,11 +266,8 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
 
   void _showEditTrailSheet() {
     final nameCtrl = TextEditingController(text: widget.trek['name'] ?? '');
-    
-    // Extract existing tags and format them into a comma-separated string
     List<dynamic> currentTags = widget.trek['tags'] ?? [];
     final tagsCtrl = TextEditingController(text: currentTags.join(', '));
-    
     bool isSaving = false;
 
     showModalBottomSheet(
@@ -293,7 +319,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                   onPressed: isSaving ? null : () async {
                     setSheetState(() => isSaving = true);
                     try {
-                      // Process tags: Clean them to lowercase and remove manual '#'
                       final rawTags = tagsCtrl.text.split(',');
                       List<String> formattedTags = [];
                       for (var t in rawTags) {
@@ -308,7 +333,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                         'tags': formattedTags,
                       }).eq('id', widget.trek['id']);
 
-                      // Update local state immediately so UI refreshes
                       setState(() {
                         widget.trek['name'] = nameCtrl.text.trim();
                         widget.trek['tags'] = formattedTags;
@@ -459,12 +483,23 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                   icon: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), shape: BoxShape.circle), child: const Icon(Icons.edit, color: Colors.white, size: 20)),
                   onPressed: _showEditTrailSheet,
                 ),
-              // NEW SHARE BUTTON
+              
+              // NEW OFFLINE MAP DOWNLOAD BUTTON
+              IconButton(
+                icon: Container(
+                  padding: const EdgeInsets.all(8), 
+                  decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), shape: BoxShape.circle), 
+                  child: _isDownloadingMap 
+                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: neonAccent, strokeWidth: 2)) 
+                      : const Icon(Icons.download_for_offline, color: Colors.white, size: 20)
+                ),
+                onPressed: _isDownloadingMap ? null : _downloadMapRegion,
+              ),
+
               IconButton(
                 icon: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), shape: BoxShape.circle), child: const Icon(Icons.ios_share, color: Colors.white, size: 20)),
                 onPressed: _shareTrail,
               ),
-              // NEW BOOKMARK/SAVE BUTTON
               IconButton(
                 icon: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), shape: BoxShape.circle), child: Icon(_isSaved ? Icons.bookmark : Icons.bookmark_border, color: _isSaved ? neonAccent : Colors.white, size: 20)),
                 onPressed: _toggleSave,

@@ -7,7 +7,8 @@ import 'package:xplore_mobile/main.dart';
 import 'package:xplore_mobile/screens/trail_detail_screen.dart';
 import 'package:xplore_mobile/screens/public_profile_screen.dart'; 
 import 'package:url_launcher/url_launcher.dart';
-import 'package:xplore_mobile/screens/saved_trails_screen.dart';
+import 'package:xplore_mobile/screens/saved_trails_screen.dart'; 
+
 import 'package:xplore_mobile/utils/offline_sync_manager.dart';
 
 const Color neonAccent = Color(0xFFD4FF00);
@@ -30,15 +31,13 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
   List<Map<String, dynamic>> _myTreks = []; 
   int _followersCount = 0;
   int _followingCount = 0;
-  
-  // Track offline sync count
   int _pendingSyncCount = 0;
 
   @override
   void initState() {
     super.initState();
     _fetchDashboardData();
-    _checkCrashRecovery(); // Fire crash recovery check on boot
+    _checkCrashRecovery();
   }
 
   Future<void> _checkCrashRecovery() async {
@@ -65,7 +64,6 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
               onPressed: () {
                 Navigator.pop(ctx);
                 if (widget.onSelectTrek != null) {
-                  // Pass an empty map to act as a flag to resume tracking in the HUD
                   widget.onSelectTrek!({'resume_crash_recovery': true});
                 }
               },
@@ -89,7 +87,6 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
       final following = await Supabase.instance.client.from('follows').select('following_id').eq('follower_id', currentUserId);
       final List<dynamic> trekData = await Supabase.instance.client.from('public_treks').select().eq('creator_id', currentUserId).order('created_at', ascending: false);
       
-      // Check offline cache for pending uploads
       final pendingTreks = await OfflineSyncManager.getPendingTreks();
           
       if (mounted) {
@@ -161,7 +158,6 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
                             ),
                             title: Text(u['display_name'] ?? 'Athlete', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                             subtitle: Text(u['username'] != null ? '@${u['username']}' : '', style: const TextStyle(color: Colors.grey)),
-                            
                             trailing: TextButton(
                               style: TextButton.styleFrom(
                                 backgroundColor: Colors.redAccent.withValues(alpha: 0.1),
@@ -177,12 +173,10 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
                                   } else {
                                     await Supabase.instance.client.from('follows').delete().eq('follower_id', myId).eq('following_id', u['id']);
                                   }
-                                  
                                   setSheetState(() {
                                     usersFuture = _getCommunityUsers(isFollowers);
                                   });
                                   _fetchDashboardData();
-                                  
                                 } catch (e) {
                                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to update. Try again.'), backgroundColor: Colors.redAccent));
                                 }
@@ -228,13 +222,7 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
   Future<void> _pickAndUploadAvatar() async {
     try {
       final ImagePicker picker = ImagePicker();
-      final XFile? image = await picker.pickImage(
-        source: ImageSource.gallery,
-        maxWidth: 1000,
-        maxHeight: 1000,
-        imageQuality: 85,
-      );
-
+      final XFile? image = await picker.pickImage(source: ImageSource.gallery, maxWidth: 1000, maxHeight: 1000, imageQuality: 85);
       if (image == null) return; 
 
       setState(() => _isLoading = true);
@@ -242,13 +230,9 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
       final userId = Supabase.instance.client.auth.currentUser!.id;
       final fileExtension = image.path.split('.').last.toLowerCase();
       final fileName = 'avatar_$userId.${fileExtension == 'jpg' ? 'jpeg' : fileExtension}';
-      
       final File file = File(image.path);
 
-      await Supabase.instance.client.storage
-          .from('Avatars')
-          .upload(fileName, file, fileOptions: const FileOptions(upsert: true));
-
+      await Supabase.instance.client.storage.from('Avatars').upload(fileName, file, fileOptions: const FileOptions(upsert: true));
       final String publicUrl = Supabase.instance.client.storage.from('Avatars').getPublicUrl(fileName);
       final String bustedUrl = '$publicUrl?t=${DateTime.now().millisecondsSinceEpoch}';
       
@@ -359,7 +343,7 @@ class _MyDashboardScreenState extends State<MyDashboardScreen> {
     );
   }
   
-void _showSettingsMenu() {
+  void _showSettingsMenu() {
     showModalBottomSheet(
       context: context, backgroundColor: cardSurface, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) => Padding(
@@ -369,17 +353,7 @@ void _showSettingsMenu() {
           children: [
             Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
             const SizedBox(height: 24),
-            
-            // NEW: SAVED TRAILS MENU BUTTON
-            ListTile(
-              leading: const Icon(Icons.bookmark, color: neonAccent), 
-              title: const Text('Saved Trails', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), 
-              onTap: () { 
-                Navigator.pop(ctx); 
-                Navigator.push(context, MaterialPageRoute(builder: (_) => const SavedTrailsScreen())); 
-              }
-            ),
-            
+            ListTile(leading: const Icon(Icons.bookmark, color: neonAccent), title: const Text('Saved Trails', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (_) => const SavedTrailsScreen())); }),
             ListTile(leading: const Icon(Icons.settings, color: Colors.white), title: const Text('App Settings', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (_) => const AppSettingsScreen())); }),
             ListTile(leading: const Icon(Icons.download_for_offline, color: Colors.white), title: const Text('Manage Offline Maps', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (_) => const ManageOfflineMapsScreen())); }),
             ListTile(leading: const Icon(Icons.help_outline, color: Colors.white), title: const Text('Help & Support', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), onTap: () { Navigator.pop(ctx); Navigator.push(context, MaterialPageRoute(builder: (_) => const HelpSupportScreen())); }),
@@ -456,7 +430,6 @@ void _showSettingsMenu() {
                               const SizedBox(height: 2),
                               Row(children: [Expanded(child: Text(displayName, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)), const SizedBox(width: 8), GestureDetector(onTap: _showEditProfileDialog, child: const Icon(Icons.edit_square, color: neonAccent, size: 16))]),
                               Text(username, style: TextStyle(color: neonAccent.withValues(alpha: 0.7), fontSize: 13)),
-                              
                               if (_userProfile?['bio'] != null && _userProfile!['bio'].toString().trim().isNotEmpty) ...[
                                 const SizedBox(height: 8),
                                 Text(_userProfile!['bio'], style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.4)),
@@ -595,7 +568,6 @@ void _showSettingsMenu() {
     );
   }
 
-  // --- UPDATED: REMOVED "EDIT" FROM POPUP MENU ---
   Widget _buildMyTrailCard(Map<String, dynamic> trek) {
     final distKm = ((trek['distance_meters'] ?? 0) / 1000).toStringAsFixed(1);
     final elevM = (trek['elevation_gain'] ?? 0).toStringAsFixed(0);
@@ -695,8 +667,14 @@ class _NeonSparklinePainter extends CustomPainter {
 }
 
 // ---------------------------------------------------------------------------
-// APP SETTINGS PERSISTENCE MANAGER
+// OFFLINE MAPS CACHE MANAGER (NEW)
 // ---------------------------------------------------------------------------
+class OfflineMapCache {
+  static List<Map<String, String>> downloadedMaps = [
+    {'name': 'Current Base Region', 'size': '15.4 MB', 'date': 'Active Cache'}
+  ];
+}
+
 class AppSettings {
   static final ValueNotifier<bool> amoledMode = ValueNotifier<bool>(false);
   static final ValueNotifier<bool> autoPause = ValueNotifier<bool>(true);
@@ -704,9 +682,6 @@ class AppSettings {
   static final ValueNotifier<bool> backgroundTracking = ValueNotifier<bool>(true);
 }
 
-// ---------------------------------------------------------------------------
-// 1. SETTINGS SCREEN
-// ---------------------------------------------------------------------------
 class AppSettingsScreen extends StatefulWidget {
   const AppSettingsScreen({super.key});
   @override State<AppSettingsScreen> createState() => _AppSettingsScreenState();
@@ -764,7 +739,7 @@ class _AppSettingsScreenState extends State<AppSettingsScreen> {
 }
 
 // ---------------------------------------------------------------------------
-// 2. OFFLINE MAPS SCREEN
+// 2. OFFLINE MAPS SCREEN (UPDATED)
 // ---------------------------------------------------------------------------
 class ManageOfflineMapsScreen extends StatefulWidget {
   const ManageOfflineMapsScreen({super.key});
@@ -772,25 +747,49 @@ class ManageOfflineMapsScreen extends StatefulWidget {
 }
 
 class _ManageOfflineMapsScreenState extends State<ManageOfflineMapsScreen> {
-  List<Map<String, String>> downloadedMaps = [{'name': 'Current Base Region', 'size': '15.4 MB', 'date': 'Active Cache'}];
-
-  void _deleteMap(int index) { final name = downloadedMaps[index]['name']; setState(() => downloadedMaps.removeAt(index)); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Cleared "$name" offline cache.'), backgroundColor: Colors.redAccent)); }
-  void _clearAllCache() { showDialog(context: context, builder: (ctx) => AlertDialog(backgroundColor: cardSurface, title: const Text('Clear All Offline Maps?', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), content: const Text('This will remove all locally stored map tiles. You will need internet to view these areas again.', style: TextStyle(color: Colors.grey)), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: Colors.grey))), ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () { Navigator.pop(ctx); setState(() => downloadedMaps.clear()); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('All offline maps removed.'))); }, child: const Text('Clear All', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))],)); }
+  void _deleteMap(int index) { 
+    final name = OfflineMapCache.downloadedMaps[index]['name']; 
+    setState(() => OfflineMapCache.downloadedMaps.removeAt(index)); 
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Cleared "$name" offline cache.'), backgroundColor: Colors.redAccent)); 
+  }
+  
+  void _clearAllCache() { 
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      backgroundColor: cardSurface, 
+      title: const Text('Clear All Offline Maps?', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), 
+      content: const Text('This will remove all locally stored map tiles. You will need internet to view these areas again.', style: TextStyle(color: Colors.grey)), 
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: Colors.grey))), 
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), 
+          onPressed: () { 
+            Navigator.pop(ctx); 
+            setState(() => OfflineMapCache.downloadedMaps.clear()); 
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('All offline maps removed.'))); 
+          }, 
+          child: const Text('Clear All', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
+        )
+      ],
+    )); 
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: bgColor,
-      appBar: AppBar(title: const Text('Offline Maps', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)), backgroundColor: bgColor, elevation: 0, iconTheme: const IconThemeData(color: Colors.white), actions: [if (downloadedMaps.isNotEmpty) IconButton(icon: const Icon(Icons.delete_sweep, color: Colors.redAccent), tooltip: 'Clear All', onPressed: _clearAllCache)]),
+      appBar: AppBar(title: const Text('Offline Maps', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)), backgroundColor: bgColor, elevation: 0, iconTheme: const IconThemeData(color: Colors.white), actions: [if (OfflineMapCache.downloadedMaps.isNotEmpty) IconButton(icon: const Icon(Icons.delete_sweep, color: Colors.redAccent), tooltip: 'Clear All', onPressed: _clearAllCache)]),
       body: Column(
         children: [
-          Container(padding: const EdgeInsets.all(16), width: double.infinity, color: neonAccent.withValues(alpha: 0.05), child: const Column(children: [Icon(Icons.signal_cellular_connected_no_internet_4_bar, color: neonAccent, size: 32), SizedBox(height: 8), Text('Navigate without cellular service.', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), SizedBox(height: 4), Text('Use the Download button on the Record Map to save specific trail regions.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 12))])),
+          Container(padding: const EdgeInsets.all(16), width: double.infinity, color: neonAccent.withValues(alpha: 0.05), child: const Column(children: [Icon(Icons.signal_cellular_connected_no_internet_4_bar, color: neonAccent, size: 32), SizedBox(height: 8), Text('Navigate without cellular service.', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), SizedBox(height: 4), Text('Use the Download button on any trail page to save specific map regions.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 12))])),
           Expanded(
-            child: downloadedMaps.isEmpty
-                ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.map_outlined, size: 54, color: Colors.grey[700]), const SizedBox(height: 12), const Text("No offline regions stored.", style: TextStyle(color: Colors.grey, fontSize: 15)), const SizedBox(height: 6), const Text("Go to the Record tab to download map sectors.", style: TextStyle(color: Colors.grey, fontSize: 12))]))
+            child: OfflineMapCache.downloadedMaps.isEmpty
+                ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.map_outlined, size: 54, color: Colors.grey[700]), const SizedBox(height: 12), const Text("No offline regions stored.", style: TextStyle(color: Colors.grey, fontSize: 15)), const SizedBox(height: 6), const Text("Go to a trail and tap download to save map sectors.", style: TextStyle(color: Colors.grey, fontSize: 12))]))
                 : ListView.builder(
-                    padding: const EdgeInsets.all(16), itemCount: downloadedMaps.length,
-                    itemBuilder: (context, index) { final map = downloadedMaps[index]; return Card(color: cardSurface, margin: const EdgeInsets.only(bottom: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), child: ListTile(contentPadding: const EdgeInsets.all(16), leading: Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.map_outlined, color: neonAccent)), title: Text(map['name']!, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), subtitle: Text('${map['size']} • ${map['date']}', style: const TextStyle(color: Colors.grey, fontSize: 12)), trailing: IconButton(icon: const Icon(Icons.delete_outline, color: Colors.redAccent), onPressed: () => _deleteMap(index)))); },
+                    padding: const EdgeInsets.all(16), itemCount: OfflineMapCache.downloadedMaps.length,
+                    itemBuilder: (context, index) { 
+                      final map = OfflineMapCache.downloadedMaps[index]; 
+                      return Card(color: cardSurface, margin: const EdgeInsets.only(bottom: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), child: ListTile(contentPadding: const EdgeInsets.all(16), leading: Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.map_outlined, color: neonAccent)), title: Text(map['name']!, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)), subtitle: Text('${map['size']} • ${map['date']}', style: const TextStyle(color: Colors.grey, fontSize: 12)), trailing: IconButton(icon: const Icon(Icons.delete_outline, color: Colors.redAccent), onPressed: () => _deleteMap(index)))); 
+                    },
                   ),
           ),
         ],

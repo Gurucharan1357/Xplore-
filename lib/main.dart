@@ -2,14 +2,17 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-// --- MODULAR SCREENS ---
 import 'package:xplore_mobile/screens/explore_screen.dart';
 import 'package:xplore_mobile/screens/my_dashboard_screen.dart' hide PublicProfileScreen;
-import 'package:xplore_mobile/screens/live_trek_hud_screen.dart';
 import 'package:xplore_mobile/services/tracking_service.dart';
+import 'package:xplore_mobile/screens/record_screen.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart'; 
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // LOAD THE ENV FILE HERE
+  await dotenv.load(fileName: ".env");
 
   await initializeTrackingService();
 
@@ -21,7 +24,20 @@ Future<void> main() async {
   runApp(const XploreApp());
 }
 
-// Inside lib/main.dart
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // WE ARE BACK IN BUSINESS!
+  await initializeTrackingService();
+
+  await Supabase.initialize(
+    url: 'https://lvkgxsfsvsydfuywphiv.supabase.co',
+    anonKey: 'sb_publishable_549oaEIaBH2n8TzYaeQbLw_8kMM9Wzb',
+  );
+
+  runApp(const XploreApp());
+}
+
 class XploreApp extends StatelessWidget {
   const XploreApp({super.key});
 
@@ -34,7 +50,7 @@ class XploreApp extends StatelessWidget {
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF0F1115),
         colorScheme: const ColorScheme.dark(
-          primary: Color(0xFFD4FF00), // <--- Change this line from Blue to Neon Yellow!
+          primary: Color(0xFFD4FF00), 
           secondary: Color(0xFFFC4C02),
           surface: Color(0xFF161922),
         ),
@@ -45,9 +61,6 @@ class XploreApp extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// AUTH GATEWAY & SCREENS
-// ---------------------------------------------------------------------------
 class AuthGateway extends StatelessWidget {
   const AuthGateway({super.key});
 
@@ -107,7 +120,7 @@ class _AuthScreenState extends State<AuthScreen> {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(Icons.terrain, size: 70, color: Color(0xFF007AFF)),
+              const Icon(Icons.terrain, size: 70, color: Color(0xFFD4FF00)), 
               const SizedBox(height: 12),
               const Text('XPLORE', textAlign: TextAlign.center, style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900, letterSpacing: 3, color: Colors.white)),
               const SizedBox(height: 40),
@@ -115,7 +128,7 @@ class _AuthScreenState extends State<AuthScreen> {
               const SizedBox(height: 16),
               TextField(controller: _passwordController, obscureText: true, style: const TextStyle(color: Colors.white), decoration: InputDecoration(labelText: 'Password', filled: true, fillColor: const Color(0xFF161922), border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none))),
               const SizedBox(height: 24),
-              SizedBox(height: 52, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF007AFF), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), onPressed: _isLoading ? null : _handleAuth, child: _isLoading ? const CircularProgressIndicator(color: Colors.white) : Text(_isSignUp ? 'Create Account' : 'Sign In', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)))),
+              SizedBox(height: 52, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD4FF00), foregroundColor: Colors.black, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))), onPressed: _isLoading ? null : _handleAuth, child: _isLoading ? const CircularProgressIndicator(color: Colors.black) : Text(_isSignUp ? 'Create Account' : 'Sign In', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)))),
               const SizedBox(height: 16),
               TextButton(onPressed: () => setState(() => _isSignUp = !_isSignUp), child: Text(_isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Sign Up", style: const TextStyle(color: Colors.grey))),
             ],
@@ -126,9 +139,6 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// ROOT NAVIGATION SHELL
-// ---------------------------------------------------------------------------
 class RootNavigationShell extends StatefulWidget {
   const RootNavigationShell({super.key});
 
@@ -154,20 +164,27 @@ class _RootNavigationShellState extends State<RootNavigationShell> {
         index: _currentIndex,
         children: [
           ExploreScreen(onSelectTrek: _onSelectTrekFromExplore),
-          LiveTrekHudScreen(trekToFollow: _selectedTrekToFollow),
+          RecordScreen(trekToFollow: _selectedTrekToFollow),
           MyDashboardScreen(onSelectTrek: _onSelectTrekFromExplore),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
-        backgroundColor: const Color(0xFF12141C),
-        indicatorColor: const Color(0xFF007AFF).withValues(alpha: 0.2),
-        selectedIndex: _currentIndex,
-        onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.explore_outlined, color: Colors.grey), selectedIcon: Icon(Icons.explore, color: Color(0xFF007AFF)), label: 'Explore'),
-          NavigationDestination(icon: Icon(Icons.radio_button_checked, color: Colors.grey), selectedIcon: Icon(Icons.radio_button_checked, color: Color(0xFF007AFF)), label: 'Record'),
-          NavigationDestination(icon: Icon(Icons.person_outline, color: Colors.grey), selectedIcon: Icon(Icons.person, color: Color(0xFF007AFF)), label: 'Profile'),
-        ],
+      bottomNavigationBar: ValueListenableBuilder<bool>(
+        valueListenable: RecordScreen.isNavHidden,
+        builder: (context, isHidden, child) {
+          if (isHidden) return const SizedBox.shrink();
+          
+          return NavigationBar(
+            backgroundColor: const Color(0xFF12141C),
+            indicatorColor: const Color(0xFFD4FF00).withValues(alpha: 0.2),
+            selectedIndex: _currentIndex,
+            onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
+            destinations: const [
+              NavigationDestination(icon: Icon(Icons.explore_outlined, color: Colors.grey), selectedIcon: Icon(Icons.explore, color: Color(0xFFD4FF00)), label: 'Explore'),
+              NavigationDestination(icon: Icon(Icons.radio_button_checked, color: Colors.grey), selectedIcon: Icon(Icons.radio_button_checked, color: Color(0xFFD4FF00)), label: 'Record'),
+              NavigationDestination(icon: Icon(Icons.person_outline, color: Colors.grey), selectedIcon: Icon(Icons.person, color: Color(0xFFD4FF00)), label: 'Profile'),
+            ],
+          );
+        },
       ),
     );
   }
