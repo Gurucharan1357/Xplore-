@@ -3,18 +3,85 @@ import 'package:flutter/services.dart';
 import 'dart:ui' as ui;
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:image_picker/image_picker.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:share_plus/share_plus.dart'; 
+import 'package:flutter_dotenv/flutter_dotenv.dart'; 
 import 'package:xplore_mobile/main.dart'; 
 import 'package:xplore_mobile/screens/explore_screen.dart';
-import 'package:xplore_mobile/screens/my_dashboard_screen.dart'; // Needed to access OfflineMapCache
+import 'package:xplore_mobile/screens/my_dashboard_screen.dart'; 
+import 'package:xplore_mobile/screens/navigation_screen.dart';
 
 const Color neonAccent = Color(0xFFD4FF00);
 const Color cardSurface = Color(0xFF161922);
 const Color bgColor = Color(0xFF0F1115);
+
+String get MAPBOX_ACCESS_TOKEN => dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
+const String styleDark = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+String get styleStandard => '{"version": 8,"sources": {"mapbox-outdoors": {"type": "raster","tiles": ["https://api.mapbox.com/styles/v1/mapbox/outdoors-v12/tiles/256/{z}/{x}/{y}@2x?access_token=$MAPBOX_ACCESS_TOKEN"],"tileSize": 256}},"layers": [{"id": "outdoors-layer","type": "raster","source": "mapbox-outdoors"}]}';
+String get styleSatellite => '{"version": 8,"sources": {"mapbox-satellite": {"type": "raster","tiles": ["https://api.mapbox.com/styles/v1/mapbox/satellite-streets-v12/tiles/256/{z}/{x}/{y}@2x?access_token=$MAPBOX_ACCESS_TOKEN"],"tileSize": 256}},"layers": [{"id": "satellite-layer","type": "raster","source": "mapbox-satellite"}]}';
+
+// Shared function for Map Arrows
+Future<Uint8List> generateIconBytes(IconData icon, Color color) async {
+  final pictureRecorder = ui.PictureRecorder();
+  final canvas = Canvas(pictureRecorder);
+  final textPainter = TextPainter(textDirection: TextDirection.ltr);
+  textPainter.text = TextSpan(
+    text: String.fromCharCode(icon.codePoint),
+    style: TextStyle(
+      fontSize: 100.0, 
+      fontFamily: icon.fontFamily,
+      package: icon.fontPackage,
+      color: color,
+    ),
+  );
+  textPainter.layout();
+  textPainter.paint(canvas, const Offset(0.0, 0.0));
+  final picture = pictureRecorder.endRecording();
+  final image = await picture.toImage(textPainter.width.toInt(), textPainter.height.toInt());
+  final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+  return byteData!.buffer.asUint8List();
+}
+
+// Shared function for 3D Map Pins
+Future<Uint8List> generate3DPinIcon(Color color, IconData iconData) async {
+  final pictureRecorder = ui.PictureRecorder();
+  final canvas = Canvas(pictureRecorder);
+  const double width = 120.0;
+  const double height = 180.0; 
+
+  final baseRect = Rect.fromCenter(center: const Offset(width / 2, height - 15), width: 70, height: 25);
+  canvas.drawOval(baseRect, Paint()..color = color.withOpacity(0.4)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4));
+  canvas.drawOval(baseRect, Paint()..color = color..style = PaintingStyle.stroke..strokeWidth = 3);
+
+  final beamPath = Path()
+    ..moveTo(width / 2 - 3, 50)
+    ..lineTo(width / 2 + 3, 50)
+    ..lineTo(width / 2 + 10, height - 15)
+    ..lineTo(width / 2 - 10, height - 15)
+    ..close();
+  canvas.drawPath(beamPath, Paint()..shader = ui.Gradient.linear(const Offset(0, 50), const Offset(0, height), [color.withOpacity(0.8), color.withOpacity(0.0)]));
+
+  canvas.drawCircle(const Offset(width / 2, 50), 38, Paint()..color = Colors.white);
+  canvas.drawCircle(const Offset(width / 2, 50), 32, Paint()..color = color);
+  canvas.drawCircle(const Offset(width / 2, 50), 28, Paint()..color = const Color(0xFF161922)); 
+
+  final textPainter = TextPainter(textDirection: TextDirection.ltr);
+  textPainter.text = TextSpan(
+    text: String.fromCharCode(iconData.codePoint),
+    style: TextStyle(fontSize: 34.0, fontFamily: iconData.fontFamily, package: iconData.fontPackage, color: Colors.white),
+  );
+  textPainter.layout();
+  textPainter.paint(canvas, Offset((width - textPainter.width) / 2, 50 - (textPainter.height / 2)));
+
+  final picture = pictureRecorder.endRecording();
+  final image = await picture.toImage(width.toInt(), height.toInt());
+  final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+  return byteData!.buffer.asUint8List();
+}
 
 class TrailDetailScreen extends StatefulWidget {
   final Map<String, dynamic> trek;
@@ -32,7 +99,7 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
   List<dynamic> _comments = [];
   List<Map<String, dynamic>> _gallery = [];
   bool _isLoadingSocial = true;
-  bool _isDownloadingMap = false; // Tracks download state
+  bool _isDownloadingMap = false; 
   final _commentController = TextEditingController();
 
   @override
@@ -68,12 +135,10 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
     }
   }
 
-  // --- NEW: DOWNLOAD MAP CACHE ---
   Future<void> _downloadMapRegion() async {
     if (widget.trek['id'] == 'imported_gpx') return;
     final trailName = widget.trek['name'] ?? 'Unknown Trail';
     
-    // Check if it already exists in the cache
     final exists = OfflineMapCache.downloadedMaps.any((m) => m['name'] == trailName);
     if (exists) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Map for "$trailName" is already downloaded!'), backgroundColor: Colors.orange));
@@ -83,7 +148,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
     setState(() => _isDownloadingMap = true);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Downloading offline map tiles for "$trailName"...'), backgroundColor: neonAccent, duration: const Duration(seconds: 2)));
     
-    // Simulate the download latency for tile fetching
     await Future.delayed(const Duration(seconds: 3));
     
     OfflineMapCache.downloadedMaps.add({
@@ -410,15 +474,49 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
       }
 
       if (pts.isNotEmpty && _mapController != null) {
-        await _mapController!.addLine(LineOptions(
-          geometry: pts, 
-          lineColor: '#D4FF00', 
-          lineWidth: 5.0, 
-          lineJoin: 'round'
-        ));
-        
-        await _mapController!.addCircle(CircleOptions(geometry: pts.first, circleRadius: 6.0, circleColor: '#00C853', circleStrokeWidth: 2.0, circleStrokeColor: '#FFFFFF'));
-        await _mapController!.addCircle(CircleOptions(geometry: pts.last, circleRadius: 6.0, circleColor: '#FC4C02', circleStrokeWidth: 2.0, circleStrokeColor: '#FFFFFF'));
+        List<List<double>> coords = pts.map((p) => [p.longitude, p.latitude]).toList();
+        final routeGeoJson = {
+          "type": "FeatureCollection",
+          "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "LineString", "coordinates": coords}}]
+        };
+
+        try {
+          await _mapController!.addSource("route-source", GeojsonSourceProperties(data: routeGeoJson));
+          
+          await _mapController!.addLineLayer("route-source", "route-casing", const LineLayerProperties(lineColor: "#FFFFFF", lineWidth: 10.0, lineCap: "round", lineJoin: "round"));
+          await _mapController!.addLineLayer("route-source", "route-layer", const LineLayerProperties(lineColor: "#D4FF00", lineWidth: 6.0, lineCap: "round", lineJoin: "round"));
+
+          try {
+            final Uint8List arrowBytes = await generateIconBytes(Icons.keyboard_double_arrow_right_rounded, Colors.white70);
+            await _mapController!.addImage("route-arrow", arrowBytes);
+            await _mapController!.addSymbolLayer("route-source", "route-arrows", const SymbolLayerProperties(
+              symbolPlacement: "line", symbolSpacing: 75.0, iconImage: "route-arrow", iconSize: 0.35, iconAllowOverlap: true,
+            ));
+          } catch (_) {}
+
+          final start = pts.first;
+          final end = pts.last;
+
+          try {
+            final Uint8List start3DPin = await generate3DPinIcon(const Color(0xFF0088FF), Icons.play_arrow_rounded);
+            await _mapController!.addImage("start-3d-pin", start3DPin);
+            
+            final Uint8List end3DPin = await generate3DPinIcon(const Color(0xFFFF0044), Icons.flag_rounded);
+            await _mapController!.addImage("end-3d-pin", end3DPin);
+          } catch (_) {}
+
+          await _mapController!.addSource("start-source", GeojsonSourceProperties(data: {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [start.longitude, start.latitude]}}]}));
+          await _mapController!.addSymbolLayer("start-source", "start-layer", const SymbolLayerProperties(
+            iconImage: "start-3d-pin", iconSize: 0.5, iconAnchor: "bottom", iconAllowOverlap: true
+          ));
+
+          await _mapController!.addSource("end-source", GeojsonSourceProperties(data: {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [end.longitude, end.latitude]}}]}));
+          await _mapController!.addSymbolLayer("end-source", "end-layer", const SymbolLayerProperties(
+            iconImage: "end-3d-pin", iconSize: 0.5, iconAnchor: "bottom", iconAllowOverlap: true
+          ));
+        } catch(e) {
+            debugPrint("Layer error: $e");
+        }
 
         double minLat = pts.first.latitude, maxLat = pts.first.latitude;
         double minLng = pts.first.longitude, maxLng = pts.first.longitude;
@@ -467,7 +565,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
     return Scaffold(
       body: CustomScrollView(
         slivers: [
-          // COLLAPSING HERO IMAGE
           SliverAppBar(
             expandedHeight: 280.0,
             pinned: true,
@@ -483,8 +580,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                   icon: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), shape: BoxShape.circle), child: const Icon(Icons.edit, color: Colors.white, size: 20)),
                   onPressed: _showEditTrailSheet,
                 ),
-              
-              // NEW OFFLINE MAP DOWNLOAD BUTTON
               IconButton(
                 icon: Container(
                   padding: const EdgeInsets.all(8), 
@@ -495,7 +590,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                 ),
                 onPressed: _isDownloadingMap ? null : _downloadMapRegion,
               ),
-
               IconButton(
                 icon: Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.5), shape: BoxShape.circle), child: const Icon(Icons.ios_share, color: Colors.white, size: 20)),
                 onPressed: _shareTrail,
@@ -523,8 +617,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
               ),
             ),
           ),
-
-          // CONTENT
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20.0),
@@ -539,7 +631,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                       Container(margin: const EdgeInsets.only(left: 16, top: 4), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: BoxDecoration(color: difficulty.toUpperCase() == 'HARD' ? Colors.redAccent.withValues(alpha: 0.2) : neonAccent.withValues(alpha: 0.2), border: Border.all(color: difficulty.toUpperCase() == 'HARD' ? Colors.redAccent : neonAccent), borderRadius: BorderRadius.circular(12)), child: Text(difficulty.toUpperCase(), style: TextStyle(color: difficulty.toUpperCase() == 'HARD' ? Colors.redAccent : neonAccent, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1))),
                     ],
                   ),
-                  
                   if (currentTags.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 12.0),
@@ -553,10 +644,7 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                         )).toList(),
                       ),
                     ),
-                  
                   const SizedBox(height: 16),
-
-                  // CREATOR CARD
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(color: cardSurface, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white10)),
@@ -576,8 +664,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                     ),
                   ),
                   const SizedBox(height: 24),
-
-                  // STATS ROW
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -587,8 +673,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                     ],
                   ),
                   const SizedBox(height: 28),
-
-                  // MINI MAP PREVIEW
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -616,7 +700,7 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                               ? MapLibreMap(
                                   onMapCreated: _onMapCreated, 
                                   onStyleLoadedCallback: _onStyleLoaded,
-                                  styleString: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json', 
+                                  styleString: styleDark, 
                                   initialCameraPosition: CameraPosition(
                                     target: LatLng(
                                       widget.trek['start_lat'] ?? 0.0, 
@@ -641,14 +725,10 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                     ),
                   ),
                   const SizedBox(height: 28),
-
-                  // ELEVATION SCRUBBER
                   const Row(children: [Icon(Icons.show_chart, color: neonAccent, size: 20), SizedBox(width: 8), Text('Elevation Profile', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))]),
                   const SizedBox(height: 16),
                   const InteractiveElevationScrubber(),
                   const SizedBox(height: 32),
-
-                  // TRAIL GALLERY SECTION
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -687,8 +767,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                               )
                             ),
                   const SizedBox(height: 32),
-
-                  // SOCIAL LOGIC
                   if (widget.trek['id'] != 'imported_gpx') ...[
                     Row(children: [const Icon(Icons.chat_bubble_outline, color: neonAccent, size: 20), const SizedBox(width: 8), Text('${_comments.length} Reviews & Conditions', style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))]),
                     const SizedBox(height: 16),
@@ -719,27 +797,48 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
           ),
         ],
       ),
-      
-      // BOTTOM ACTION BAR
       bottomNavigationBar: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+        padding: const EdgeInsets.only(left: 20, right: 20, top: 16, bottom: 24),
         decoration: const BoxDecoration(color: bgColor, border: Border(top: BorderSide(color: Colors.white10))),
         child: SafeArea(
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Expanded(
-                child: SizedBox(
-                  height: 54,
-                  child: ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(backgroundColor: neonAccent, foregroundColor: Colors.black, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), elevation: 0),
-                    icon: const Icon(Icons.navigation_rounded, size: 20),
-                    onPressed: () {
-                      Navigator.pop(context);
-                      widget.onStartTrail();
-                    },
-                    label: const Text('Start Navigation', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.info_outline, color: Colors.grey, size: 14),
+                  SizedBox(width: 6),
+                  Text('You can follow this route in reverse during navigation.', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: SizedBox(
+                      height: 54,
+                      child: ElevatedButton.icon(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: neonAccent, 
+                          foregroundColor: Colors.black, 
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), 
+                          elevation: 0
+                        ),
+                        icon: const Icon(Icons.navigation_rounded, size: 20),
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => NavigationScreen(trekToFollow: widget.trek),
+                            ),
+                          );
+                        },
+                        label: const Text('Start Navigation', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      ),
+                    ),
                   ),
-                ),
+                ],
               ),
             ],
           ),
@@ -760,9 +859,6 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// INTERACTIVE ELEVATION SCRUBBER WIDGET
-// ---------------------------------------------------------------------------
 class InteractiveElevationScrubber extends StatefulWidget { const InteractiveElevationScrubber({super.key}); @override State<InteractiveElevationScrubber> createState() => _InteractiveElevationScrubberState(); }
 class _InteractiveElevationScrubberState extends State<InteractiveElevationScrubber> {
   final List<double> normalizedData = [0.1, 0.15, 0.2, 0.35, 0.6, 0.8, 0.9, 1.0, 0.85, 0.6, 0.3, 0.1];
@@ -800,9 +896,6 @@ class _ScrubberPainter extends CustomPainter {
   @override bool shouldRepaint(covariant _ScrubberPainter oldDelegate) => oldDelegate.scrubX != scrubX;
 }
 
-// ---------------------------------------------------------------------------
-// FULLSCREEN INTERACTIVE ROUTE VIEWER
-// ---------------------------------------------------------------------------
 class FullscreenRouteMapScreen extends StatefulWidget {
   final Map<String, dynamic> trek;
   const FullscreenRouteMapScreen({super.key, required this.trek});
@@ -813,6 +906,7 @@ class FullscreenRouteMapScreen extends StatefulWidget {
 
 class _FullscreenRouteMapScreenState extends State<FullscreenRouteMapScreen> {
   MapLibreMapController? _mapController;
+  String _currentMapStyle = styleDark; 
 
   Future<void> _onMapCreated(MapLibreMapController controller) async {
     _mapController = controller;
@@ -847,9 +941,49 @@ class _FullscreenRouteMapScreenState extends State<FullscreenRouteMapScreen> {
       }
 
       if (pts.isNotEmpty && _mapController != null) {
-        await _mapController!.addLine(LineOptions(geometry: pts, lineColor: '#D4FF00', lineWidth: 6.0, lineJoin: 'round'));
-        await _mapController!.addCircle(CircleOptions(geometry: pts.first, circleRadius: 7.0, circleColor: '#00C853', circleStrokeWidth: 2.0, circleStrokeColor: '#FFFFFF'));
-        await _mapController!.addCircle(CircleOptions(geometry: pts.last, circleRadius: 7.0, circleColor: '#FC4C02', circleStrokeWidth: 2.0, circleStrokeColor: '#FFFFFF'));
+        List<List<double>> coords = pts.map((p) => [p.longitude, p.latitude]).toList();
+        final routeGeoJson = {
+          "type": "FeatureCollection",
+          "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "LineString", "coordinates": coords}}]
+        };
+
+        try {
+          await _mapController!.addSource("route-source", GeojsonSourceProperties(data: routeGeoJson));
+          
+          await _mapController!.addLineLayer("route-source", "route-casing", const LineLayerProperties(lineColor: "#FFFFFF", lineWidth: 12.0, lineCap: "round", lineJoin: "round"));
+          await _mapController!.addLineLayer("route-source", "route-layer", const LineLayerProperties(lineColor: "#D4FF00", lineWidth: 6.0, lineCap: "round", lineJoin: "round"));
+
+          try {
+            final Uint8List arrowBytes = await generateIconBytes(Icons.keyboard_double_arrow_right_rounded, Colors.white70);
+            await _mapController!.addImage("route-arrow", arrowBytes);
+            await _mapController!.addSymbolLayer("route-source", "route-arrows", const SymbolLayerProperties(
+              symbolPlacement: "line", symbolSpacing: 75.0, iconImage: "route-arrow", iconSize: 0.4, iconAllowOverlap: true,
+            ));
+          } catch (_) {}
+
+          final start = pts.first;
+          final end = pts.last;
+
+          try {
+            final Uint8List start3DPin = await generate3DPinIcon(const Color(0xFF0088FF), Icons.play_arrow_rounded);
+            await _mapController!.addImage("start-3d-pin", start3DPin);
+            
+            final Uint8List end3DPin = await generate3DPinIcon(const Color(0xFFFF0044), Icons.flag_rounded);
+            await _mapController!.addImage("end-3d-pin", end3DPin);
+          } catch (_) {}
+
+          await _mapController!.addSource("start-source", GeojsonSourceProperties(data: {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [start.longitude, start.latitude]}}]}));
+          await _mapController!.addSymbolLayer("start-source", "start-layer", const SymbolLayerProperties(
+            iconImage: "start-3d-pin", iconSize: 0.5, iconAnchor: "bottom", iconAllowOverlap: true
+          ));
+
+          await _mapController!.addSource("end-source", GeojsonSourceProperties(data: {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [end.longitude, end.latitude]}}]}));
+          await _mapController!.addSymbolLayer("end-source", "end-layer", const SymbolLayerProperties(
+            iconImage: "end-3d-pin", iconSize: 0.5, iconAnchor: "bottom", iconAllowOverlap: true
+          ));
+        } catch(e) {
+            debugPrint("Layer error: $e");
+        }
 
         double minLat = pts.first.latitude, maxLat = pts.first.latitude;
         double minLng = pts.first.longitude, maxLng = pts.first.longitude;
@@ -870,6 +1004,56 @@ class _FullscreenRouteMapScreenState extends State<FullscreenRouteMapScreen> {
     }
   }
 
+  void _showMapStyleSelector() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: cardSurface,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
+            const SizedBox(height: 24),
+            const Text('Map Type', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _buildMapTypeOption('Dark', Icons.dark_mode, styleDark),
+                _buildMapTypeOption('Outdoors', Icons.terrain, styleStandard),
+                _buildMapTypeOption('Satellite', Icons.satellite, styleSatellite),
+              ],
+            ),
+            const SizedBox(height: 24),
+          ],
+        ),
+      )
+    );
+  }
+
+  Widget _buildMapTypeOption(String label, IconData icon, String styleString) {
+    final isSelected = _currentMapStyle == styleString;
+    return GestureDetector(
+      onTap: () {
+        setState(() => _currentMapStyle = styleString);
+        Navigator.pop(context);
+      },
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(color: isSelected ? neonAccent.withValues(alpha: 0.2) : bgColor, shape: BoxShape.circle, border: Border.all(color: isSelected ? neonAccent : Colors.white10, width: 2)),
+            child: Icon(icon, color: isSelected ? neonAccent : Colors.white, size: 28),
+          ),
+          const SizedBox(height: 8),
+          Text(label, style: TextStyle(color: isSelected ? neonAccent : Colors.grey, fontWeight: FontWeight.bold, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -878,28 +1062,39 @@ class _FullscreenRouteMapScreenState extends State<FullscreenRouteMapScreen> {
         backgroundColor: const Color(0xFF0F1115),
         elevation: 0,
       ),
-      body: MapLibreMap(
-        onMapCreated: _onMapCreated,
-        onStyleLoadedCallback: _onStyleLoaded,
-        styleString: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-        initialCameraPosition: CameraPosition(
-          target: LatLng(widget.trek['start_lat'] ?? 0.0, widget.trek['start_lng'] ?? 0.0),
-          zoom: 13.0,
-        ),
-        myLocationEnabled: true,
-        compassEnabled: true,
-        scrollGesturesEnabled: true,
-        zoomGesturesEnabled: true,
-        rotateGesturesEnabled: true,
-        tiltGesturesEnabled: true,
+      body: Stack(
+        children: [
+          MapLibreMap(
+            onMapCreated: _onMapCreated,
+            onStyleLoadedCallback: _onStyleLoaded,
+            styleString: _currentMapStyle, 
+            initialCameraPosition: CameraPosition(
+              target: LatLng(widget.trek['start_lat'] ?? 0.0, widget.trek['start_lng'] ?? 0.0),
+              zoom: 13.0,
+            ),
+            myLocationEnabled: true,
+            compassEnabled: true,
+            scrollGesturesEnabled: true,
+            zoomGesturesEnabled: true,
+            rotateGesturesEnabled: true,
+            tiltGesturesEnabled: true,
+          ),
+          Positioned(
+            right: 16,
+            bottom: 32,
+            child: FloatingActionButton(
+              heroTag: 'overview_layers_btn',
+              backgroundColor: cardSurface,
+              onPressed: _showMapStyleSelector,
+              child: const Icon(Icons.layers, color: Colors.white),
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-// ---------------------------------------------------------------------------
-// FULLSCREEN IMAGE VIEWER
-// ---------------------------------------------------------------------------
 class FullscreenImageViewer extends StatelessWidget {
   final String imageUrl;
   const FullscreenImageViewer({super.key, required this.imageUrl});

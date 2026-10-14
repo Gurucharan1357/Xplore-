@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:xplore_mobile/screens/explore_screen.dart';
@@ -13,19 +14,6 @@ Future<void> main() async {
 
   // LOAD THE ENV FILE HERE
   await dotenv.load(fileName: ".env");
-
-  await initializeTrackingService();
-
-  await Supabase.initialize(
-    url: 'https://lvkgxsfsvsydfuywphiv.supabase.co',
-    anonKey: 'sb_publishable_549oaEIaBH2n8TzYaeQbLw_8kMM9Wzb',
-  );
-
-  runApp(const XploreApp());
-}
-
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
 
   // WE ARE BACK IN BUSINESS!
   await initializeTrackingService();
@@ -149,6 +137,7 @@ class RootNavigationShell extends StatefulWidget {
 class _RootNavigationShellState extends State<RootNavigationShell> {
   int _currentIndex = 1; 
   Map<String, dynamic>? _selectedTrekToFollow;
+  DateTime? _lastQuitTime; // Tracks the last back button press
 
   void _onSelectTrekFromExplore(Map<String, dynamic> trek) {
     setState(() {
@@ -159,32 +148,63 @@ class _RootNavigationShellState extends State<RootNavigationShell> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: IndexedStack(
-        index: _currentIndex,
-        children: [
-          ExploreScreen(onSelectTrek: _onSelectTrekFromExplore),
-          RecordScreen(trekToFollow: _selectedTrekToFollow),
-          MyDashboardScreen(onSelectTrek: _onSelectTrekFromExplore),
-        ],
-      ),
-      bottomNavigationBar: ValueListenableBuilder<bool>(
-        valueListenable: RecordScreen.isNavHidden,
-        builder: (context, isHidden, child) {
-          if (isHidden) return const SizedBox.shrink();
-          
-          return NavigationBar(
-            backgroundColor: const Color(0xFF12141C),
-            indicatorColor: const Color(0xFFD4FF00).withValues(alpha: 0.2),
-            selectedIndex: _currentIndex,
-            onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
-            destinations: const [
-              NavigationDestination(icon: Icon(Icons.explore_outlined, color: Colors.grey), selectedIcon: Icon(Icons.explore, color: Color(0xFFD4FF00)), label: 'Explore'),
-              NavigationDestination(icon: Icon(Icons.radio_button_checked, color: Colors.grey), selectedIcon: Icon(Icons.radio_button_checked, color: Color(0xFFD4FF00)), label: 'Record'),
-              NavigationDestination(icon: Icon(Icons.person_outline, color: Colors.grey), selectedIcon: Icon(Icons.person, color: Color(0xFFD4FF00)), label: 'Profile'),
-            ],
+    return PopScope(
+      canPop: false, // Prevents default back behavior
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        
+        final now = DateTime.now();
+        if (_lastQuitTime == null || now.difference(_lastQuitTime!) > const Duration(seconds: 2)) {
+          _lastQuitTime = now;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text(
+                'Press back again to exit',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              ),
+              duration: const Duration(seconds: 2),
+              backgroundColor: Colors.black.withOpacity(0.7), // Translucent background
+              behavior: SnackBarBehavior.floating, // Makes it float
+              elevation: 0,
+              margin: const EdgeInsets.only(bottom: 120, left: 60, right: 60), // Lifts it above the Start button
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(30), // Pill shape
+              ),
+            ),
           );
-        },
+        } else {
+          // Exit the app if pressed twice within 2 seconds
+          SystemNavigator.pop();
+        }
+      },
+      child: Scaffold(
+        body: IndexedStack(
+          index: _currentIndex,
+          children: [
+            ExploreScreen(onSelectTrek: _onSelectTrekFromExplore),
+            RecordScreen(trekToFollow: _selectedTrekToFollow),
+            MyDashboardScreen(onSelectTrek: _onSelectTrekFromExplore),
+          ],
+        ),
+        bottomNavigationBar: ValueListenableBuilder<bool>(
+          valueListenable: RecordScreen.isNavHidden,
+          builder: (context, isHidden, child) {
+            if (isHidden) return const SizedBox.shrink();
+            
+            return NavigationBar(
+              backgroundColor: const Color(0xFF12141C),
+              indicatorColor: const Color(0xFFD4FF00).withValues(alpha: 0.2),
+              selectedIndex: _currentIndex,
+              onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
+              destinations: const [
+                NavigationDestination(icon: Icon(Icons.explore_outlined, color: Colors.grey), selectedIcon: Icon(Icons.explore, color: Color(0xFFD4FF00)), label: 'Explore'),
+                NavigationDestination(icon: Icon(Icons.radio_button_checked, color: Colors.grey), selectedIcon: Icon(Icons.radio_button_checked, color: Color(0xFFD4FF00)), label: 'Record'),
+                NavigationDestination(icon: Icon(Icons.person_outline, color: Colors.grey), selectedIcon: Icon(Icons.person, color: Color(0xFFD4FF00)), label: 'Profile'),
+              ],
+            );
+          },
+        ),
       ),
     );
   }

@@ -9,8 +9,10 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:maps_toolkit/maps_toolkit.dart' as mt;
 import 'package:vibration/vibration.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart'; 
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:xplore_mobile/screens/notifications_screen.dart';
 
-// Safely loads the token from your .env file
 String get MAPBOX_ACCESS_TOKEN => dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
 
 const Color neonAccent = Color(0xFFD4FF00);
@@ -18,8 +20,6 @@ const Color cardSurface = Color(0xFF161922);
 const Color bgColor = Color(0xFF0F1115);
 
 const String styleDark = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
-
-// We use a getter for these so they pull the token dynamically when needed
 String get styleStandard => '{"version": 8,"sources": {"mapbox-outdoors": {"type": "raster","tiles": ["https://api.mapbox.com/styles/v1/mapbox/outdoors-v12/tiles/256/{z}/{x}/{y}@2x?access_token=$MAPBOX_ACCESS_TOKEN"],"tileSize": 256}},"layers": [{"id": "outdoors-layer","type": "raster","source": "mapbox-outdoors"}]}';
 String get styleSatellite => '{"version": 8,"sources": {"mapbox-satellite": {"type": "raster","tiles": ["https://api.mapbox.com/styles/v1/mapbox/satellite-streets-v12/tiles/256/{z}/{x}/{y}@2x?access_token=$MAPBOX_ACCESS_TOKEN"],"tileSize": 256}},"layers": [{"id": "satellite-layer","type": "raster","source": "mapbox-satellite"}]}';
 
@@ -50,7 +50,54 @@ class _RecordScreenState extends State<RecordScreen> {
   String _elevation = "0";
 
   List<mt.LatLng> _routeGeometryPoints = [];
+  List<mt.LatLng> _actualRecordedPoints = []; 
+  
   bool _isOffRoute = false;
+  
+  // Real Notification State
+  int _unreadCount = 0; 
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreRecordingState();
+    _fetchUnreadNotifications();
+  }
+
+  // Fetch actual unread count from Supabase
+  Future<void> _fetchUnreadNotifications() async {
+    try {
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user == null) return;
+      
+      final res = await Supabase.instance.client
+          .from('user_notifications')
+          .select('id')
+          .eq('user_id', user.id)
+          .eq('is_read', false);
+
+      if (mounted) {
+        setState(() {
+          _unreadCount = (res as List).length;
+        });
+      }
+    } catch (e) {
+      debugPrint("Error fetching unread count: $e");
+    }
+  }
+
+  // Open screen and clear badge on return
+  Future<void> _openNotifications() async {
+    await Navigator.push(
+      context, 
+      MaterialPageRoute(builder: (context) => const NotificationsScreen()),
+    );
+    
+    // NotificationsScreen marks all as read when loaded; update count immediately
+    if (mounted) {
+      setState(() => _unreadCount = 0);
+    }
+  }
 
   @override
   void didUpdateWidget(RecordScreen oldWidget) {
@@ -69,6 +116,95 @@ class _RecordScreenState extends State<RecordScreen> {
     super.dispose();
   }
 
+  Future<void> _restoreRecordingState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final isRec = prefs.getBool('is_recording') ?? false;
+    
+    if (isRec) {
+      final startTime = prefs.getInt('start_time') ?? DateTime.now().millisecondsSinceEpoch;
+      setState(() {
+        _isRecording = true;
+        _isHudExpanded = true;
+        RecordScreen.isNavHidden.value = true;
+        _elapsedSeconds = (DateTime.now().millisecondsSinceEpoch - startTime) ~/ 1000;
+      });
+      _startStopwatch();
+      _reconnectServiceListener();
+    }
+  }
+
+  void _reconnectServiceListener() {
+    final service = FlutterBackgroundService();
+    _serviceSubscription = service.on('update').listen((event) async {
+      if (event != null && mounted && !_isPaused) {
+        double speed = event['speed'] ?? 0.0;
+        double alt = event['altitude'] ?? 0.0;
+        double lat = event['lat'] ?? 0.0;
+        double lng = event['lng'] ?? 0.0;
+        
+        mt.LatLng currentLoc = mt.LatLng(lat, lng);
+
+        setState(() {
+          _elevation = alt.toStringAsFixed(0);
+          if (speed > 0.5) { 
+            double paceMinPerKm = (60 / (speed * 3.6));
+            int pMin = paceMinPerKm.floor();
+            int pSec = ((paceMinPerKm - pMin) * 60).round();
+            _pace = "$pMin:${pSec.toString().padLeft(2, '0')}";
+          }
+        });
+
+        _actualRecordedPoints.add(currentLoc);
+
+        if (_actualRecordedPoints.length > 1 && _mapController != null) {
+          try {
+            await _mapController!.setGeoJsonSource("walked-source", {
+              "type": "FeatureCollection",
+              "features": [
+                {
+                  "type": "Feature",
+                  "geometry": {
+                    "type": "LineString",
+                    "coordinates": _actualRecordedPoints.map((p) => [p.longitude, p.latitude]).toList()
+                  }
+                }
+              ]
+            });
+          } catch (_) {}
+        }
+
+        if (_routeGeometryPoints.isNotEmpty) {
+          bool isOnRoute = mt.PolygonUtil.isLocationOnPath(currentLoc, _routeGeometryPoints, false, tolerance: 40.0);
+          
+          if (!isOnRoute && !_isOffRoute) {
+            setState(() => _isOffRoute = true);
+            _stopwatchTimer?.cancel(); 
+            Vibration.vibrate(pattern: [500, 1000, 500, 1000]); 
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Off Route! Tracking paused until you return.'), backgroundColor: Colors.redAccent, duration: Duration(seconds: 3)));
+          } 
+          else if (isOnRoute && _isOffRoute) {
+            setState(() => _isOffRoute = false);
+            _startStopwatch(); 
+            Vibration.vibrate(duration: 200);
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Back on route! Tracking resumed.'), backgroundColor: Colors.green, duration: Duration(seconds: 2)));
+          }
+
+          final endPoint = _routeGeometryPoints.last;
+          final distToEnd = mt.SphericalUtil.computeDistanceBetween(currentLoc, endPoint);
+          if (distToEnd < 15.0 && _isRecording && !_isPaused) {
+            setState(() {
+              _isPaused = true;
+              _isHudExpanded = true;
+            });
+            _stopwatchTimer?.cancel();
+            Vibration.vibrate(pattern: [300, 150, 300]);
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Destination reached! Hold Finish to save.'), backgroundColor: neonAccent, duration: Duration(seconds: 4)));
+          }
+        }
+      }
+    });
+  }
+
   void _onMapCreated(MapLibreMapController controller) {
     _mapController = controller;
     _recenterMap();
@@ -84,12 +220,7 @@ class _RecordScreenState extends State<RecordScreen> {
     final textPainter = TextPainter(textDirection: TextDirection.ltr);
     textPainter.text = TextSpan(
       text: String.fromCharCode(icon.codePoint),
-      style: TextStyle(
-        fontSize: 100.0, 
-        fontFamily: icon.fontFamily,
-        package: icon.fontPackage,
-        color: color,
-      ),
+      style: TextStyle(fontSize: 100.0, fontFamily: icon.fontFamily, package: icon.fontPackage, color: color),
     );
     textPainter.layout();
     textPainter.paint(canvas, const Offset(0.0, 0.0));
@@ -116,50 +247,71 @@ class _RecordScreenState extends State<RecordScreen> {
     }
 
     if (geojsonData is Map<String, dynamic> && geojsonData['type'] == 'LineString') {
-      geojsonData = {
-        "type": "FeatureCollection",
-        "features": [{"type": "Feature","properties": {},"geometry": geojsonData}]
-      };
+      geojsonData = {"type": "FeatureCollection", "features": [{"type": "Feature","properties": {},"geometry": geojsonData}]};
     }
 
     try {
+      try { await _mapController!.removeLayer("walked-glow"); } catch (_) {}
+      try { await _mapController!.removeLayer("walked-layer"); } catch (_) {}
+      try { await _mapController!.removeSource("walked-source"); } catch (_) {}
+      try { await _mapController!.removeLayer("trek-arrows"); } catch (_) {} 
       try { await _mapController!.removeLayer("trek-layer"); } catch (_) {}
+      try { await _mapController!.removeLayer("trek-casing"); } catch (_) {}
       try { await _mapController!.removeSource("trek-source"); } catch (_) {}
-      try { await _mapController!.removeLayer("start-layer"); } catch (_) {}
+      
+      final markerLayers = ['start-glow', 'start-border', 'start-core', 'end-glow', 'end-border', 'end-core'];
+      for (var layer in markerLayers) {
+        try { await _mapController!.removeLayer(layer); } catch (_) {}
+      }
       try { await _mapController!.removeSource("start-source"); } catch (_) {}
-      try { await _mapController!.removeLayer("end-layer"); } catch (_) {}
       try { await _mapController!.removeSource("end-source"); } catch (_) {}
 
       await _mapController!.addSource("trek-source", GeojsonSourceProperties(data: geojsonData));
+      
+      await _mapController!.addLineLayer("trek-source", "trek-casing", const LineLayerProperties(
+        lineColor: "#FFFFFF", lineWidth: 10.0, lineCap: "round", lineJoin: "round",
+      ));
+      
       await _mapController!.addLineLayer("trek-source", "trek-layer", const LineLayerProperties(
-        lineColor: "#D4FF00", lineWidth: 6.0, lineCap: "round", lineJoin: "round",
+        lineColor: "#888888", lineWidth: 6.0, lineCap: "round", lineJoin: "round",
+      ));
+
+      try {
+        final Uint8List arrowBytes = await _generateIconBytes(Icons.chevron_right_rounded, Colors.white70);
+        await _mapController!.addImage("route-arrow", arrowBytes);
+        await _mapController!.addSymbolLayer("trek-source", "trek-arrows", const SymbolLayerProperties(
+          symbolPlacement: "line",    
+          symbolSpacing: 75.0,        
+          iconImage: "route-arrow",
+          iconSize: 0.35,             
+          iconAllowOverlap: true,
+          iconIgnorePlacement: false,
+        ));
+      } catch (_) {}
+
+      await _mapController!.addSource("walked-source", const GeojsonSourceProperties(data: {"type": "FeatureCollection", "features": []}));
+      
+      await _mapController!.addLineLayer("walked-source", "walked-glow", const LineLayerProperties(
+        lineColor: "#D4FF00", lineWidth: 14.0, lineOpacity: 0.4, lineBlur: 4.0, lineCap: "round", lineJoin: "round",
+      ));
+
+      await _mapController!.addLineLayer("walked-source", "walked-layer", const LineLayerProperties(
+        lineColor: "#AADD00", lineWidth: 6.0, lineCap: "round", lineJoin: "round",
       ));
 
       if (_routeGeometryPoints.isNotEmpty) {
         final start = _routeGeometryPoints.first;
         final end = _routeGeometryPoints.last;
 
-        await _mapController!.addSource("start-source", GeojsonSourceProperties(data: {
-          "type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [start.longitude, start.latitude]}}]
-        }));
-        await _mapController!.addCircleLayer("start-source", "start-layer", const CircleLayerProperties(
-          circleRadius: 8.0, circleColor: "#00FF00", circleStrokeWidth: 3.0, circleStrokeColor: "#161922",
-        ));
+        await _mapController!.addSource("start-source", GeojsonSourceProperties(data: {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [start.longitude, start.latitude]}}]}));
+        await _mapController!.addCircleLayer("start-source", "start-glow", const CircleLayerProperties(circleRadius: 18.0, circleColor: "#0088FF", circleOpacity: 0.3, circleBlur: 0.5));
+        await _mapController!.addCircleLayer("start-source", "start-border", const CircleLayerProperties(circleRadius: 8.0, circleColor: "#FFFFFF"));
+        await _mapController!.addCircleLayer("start-source", "start-core", const CircleLayerProperties(circleRadius: 5.0, circleColor: "#00BFFF"));
 
-        try {
-          final Uint8List flagBytes = await _generateIconBytes(Icons.flag_rounded, Colors.redAccent);
-          await _mapController!.addImage("end-flag-icon", flagBytes);
-        } catch (_) {} 
-
-        await _mapController!.addSource("end-source", GeojsonSourceProperties(data: {
-          "type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [end.longitude, end.latitude]}}]
-        }));
-        
-        await _mapController!.addSymbolLayer("end-source", "end-layer", const SymbolLayerProperties(
-          iconImage: "end-flag-icon",
-          iconSize: 0.6,
-          iconAnchor: "bottom-left", 
-        ));
+        await _mapController!.addSource("end-source", GeojsonSourceProperties(data: {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [end.longitude, end.latitude]}}]}));
+        await _mapController!.addCircleLayer("end-source", "end-glow", const CircleLayerProperties(circleRadius: 18.0, circleColor: "#FF0044", circleOpacity: 0.3, circleBlur: 0.5));
+        await _mapController!.addCircleLayer("end-source", "end-border", const CircleLayerProperties(circleRadius: 8.0, circleColor: "#FFFFFF"));
+        await _mapController!.addCircleLayer("end-source", "end-core", const CircleLayerProperties(circleRadius: 5.0, circleColor: "#FF3366"));
       }
 
       _mapController!.animateCamera(CameraUpdate.zoomTo(14.0));
@@ -168,9 +320,20 @@ class _RecordScreenState extends State<RecordScreen> {
     }
   }
 
-  void _recenterMap() {
+  void _recenterMap() async {
     if (_mapController != null) {
       _mapController!.updateMyLocationTrackingMode(MyLocationTrackingMode.trackingCompass);
+      try {
+        Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+        _mapController!.animateCamera(
+          CameraUpdate.newLatLngZoom(
+            LatLng(position.latitude, position.longitude), 
+            16.5, 
+          ),
+        );
+      } catch (e) {
+        debugPrint("Error recentering map: $e");
+      }
     }
   }
 
@@ -193,6 +356,8 @@ class _RecordScreenState extends State<RecordScreen> {
   }
 
   void _toggleTracking() async {
+    final prefs = await SharedPreferences.getInstance();
+
     if (!_isRecording) {
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
@@ -200,49 +365,22 @@ class _RecordScreenState extends State<RecordScreen> {
         if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) return;
       }
 
+      await prefs.setBool('is_recording', true);
+      await prefs.setInt('start_time', DateTime.now().millisecondsSinceEpoch);
+
       setState(() {
         _isRecording = true;
         _isPaused = false;
         _isHudExpanded = true; 
         RecordScreen.isNavHidden.value = true; 
-        _mapController?.updateMyLocationTrackingMode(MyLocationTrackingMode.tracking);
       });
+
+      _recenterMap(); 
 
       final service = FlutterBackgroundService();
       await service.startService();
       _startStopwatch();
-
-      _serviceSubscription = service.on('update').listen((event) async {
-        if (event != null && mounted && !_isPaused) {
-          setState(() {
-            double speed = event['speed'] ?? 0.0;
-            double alt = event['altitude'] ?? 0.0;
-            double lat = event['lat'] ?? 0.0;
-            double lng = event['lng'] ?? 0.0;
-            
-            _elevation = alt.toStringAsFixed(0);
-            
-            if (speed > 0.5) { 
-              double paceMinPerKm = (60 / (speed * 3.6));
-              int pMin = paceMinPerKm.floor();
-              int pSec = ((paceMinPerKm - pMin) * 60).round();
-              _pace = "$pMin:${pSec.toString().padLeft(2, '0')}";
-            }
-
-            if (_routeGeometryPoints.isNotEmpty) {
-              mt.LatLng currentLoc = mt.LatLng(lat, lng);
-              bool isOnRoute = mt.PolygonUtil.isLocationOnPath(currentLoc, _routeGeometryPoints, false, tolerance: 40.0);
-              
-              if (!isOnRoute && !_isOffRoute) {
-                _isOffRoute = true;
-                Vibration.vibrate(pattern: [500, 1000, 500, 1000]); 
-              } else if (isOnRoute && _isOffRoute) {
-                _isOffRoute = false;
-              }
-            }
-          });
-        }
-      });
+      _reconnectServiceListener();
 
     } else if (_isRecording && !_isPaused) {
       setState(() => _isPaused = true);
@@ -253,26 +391,61 @@ class _RecordScreenState extends State<RecordScreen> {
     }
   }
 
-  void _finishTrek() {
+  Future<void> _finishTrek() async {
     _stopwatchTimer?.cancel();
     _serviceSubscription?.cancel();
     FlutterBackgroundService().invoke("stopService");
 
-    setState(() {
-      _isRecording = false;
-      _isPaused = false;
-      _isHudExpanded = false; 
-      _isOffRoute = false; 
-      RecordScreen.isNavHidden.value = false; 
-      _elapsedSeconds = 0;
-      _elapsedTime = "00:00:00";
-      _distance = "0.00";
-      _pace = "--:--";
-      _elevation = "0";
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Trek Finished & Saved!'), backgroundColor: Colors.green)
-    );
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('is_recording');
+    await prefs.remove('start_time');
+
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saving trek data...'), duration: Duration(seconds: 1)));
+
+    try {
+      final List<Map<String, double>> routeJson = _actualRecordedPoints
+          .map((point) => {'lat': point.latitude, 'lng': point.longitude})
+          .toList();
+      
+      final myId = Supabase.instance.client.auth.currentUser!.id;
+
+      await Supabase.instance.client.from('completed_treks').insert({
+        'user_id': myId,
+        'trek_name': widget.trekToFollow?['name'] ?? 'Freestyle Trek',
+        'distance': _distance,
+        'duration': _elapsedTime,
+        'pace': _pace,
+        'elevation_gain': _elevation,
+        'recorded_route': routeJson,
+      });
+
+      setState(() {
+        _isRecording = false;
+        _isPaused = false;
+        _isHudExpanded = false; 
+        _isOffRoute = false; 
+        RecordScreen.isNavHidden.value = false; 
+        _elapsedSeconds = 0;
+        _elapsedTime = "00:00:00";
+        _distance = "0.00";
+        _pace = "--:--";
+        _elevation = "0";
+        _actualRecordedPoints.clear();
+      });
+
+      try {
+        await _mapController!.setGeoJsonSource("walked-source", const {"type": "FeatureCollection", "features": []});
+      } catch (_) {}
+
+      _mapController?.animateCamera(CameraUpdate.tiltTo(0.0));
+      _mapController?.animateCamera(CameraUpdate.zoomTo(14.0));
+
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Trek Finished & Saved to Profile!'), backgroundColor: Colors.green));
+      
+    } catch (e) {
+      debugPrint("Error saving trek: $e");
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to save trek: $e'), backgroundColor: Colors.red));
+    }
   }
 
   void _showMapStyleSelector() {
@@ -366,13 +539,61 @@ class _RecordScreenState extends State<RecordScreen> {
                     ],
                   ),
                 ),
-                GestureDetector(
-                  onTap: _resetCompass,
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(color: Colors.black.withOpacity(0.7), shape: BoxShape.circle, border: Border.all(color: Colors.white10)),
-                    child: const Icon(Icons.explore, color: Colors.white, size: 20),
-                  ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    GestureDetector(
+                      onTap: _openNotifications, // DYNAMIC BADGE LOGIC
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.7), 
+                          shape: BoxShape.circle, 
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            const Icon(Icons.notifications_none, color: Colors.white, size: 20),
+                            if (_unreadCount > 0)
+                              Positioned(
+                                top: -6, 
+                                right: -6,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: Colors.redAccent,
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                                  child: Center(
+                                    child: Text(
+                                      _unreadCount > 9 ? '9+' : '$_unreadCount',
+                                      style: const TextStyle(
+                                        color: Colors.white, 
+                                        fontSize: 9, 
+                                        fontWeight: FontWeight.bold, 
+                                        height: 1,
+                                      ),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    GestureDetector(
+                      onTap: _resetCompass,
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(color: Colors.black.withOpacity(0.7), shape: BoxShape.circle, border: Border.all(color: Colors.white10)),
+                        child: const Icon(Icons.explore, color: Colors.white, size: 20),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -483,14 +704,7 @@ class _RecordScreenState extends State<RecordScreen> {
                                     if (_isPaused) ...[
                                       const SizedBox(width: 16),
                                       Expanded(
-                                        child: SizedBox(
-                                          height: 56,
-                                          child: ElevatedButton(
-                                            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(100))),
-                                            onPressed: _finishTrek,
-                                            child: const Text('FINISH', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, letterSpacing: 1)),
-                                          ),
-                                        ),
+                                        child: HoldToFinishButton(onComplete: _finishTrek),
                                       ),
                                     ]
                                   ],
@@ -525,6 +739,61 @@ class _RecordScreenState extends State<RecordScreen> {
         const SizedBox(height: 4),
         Text(label, style: const TextStyle(color: Colors.grey, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1)),
       ],
+    );
+  }
+}
+
+class HoldToFinishButton extends StatefulWidget {
+  final VoidCallback onComplete;
+  const HoldToFinishButton({super.key, required this.onComplete});
+
+  @override
+  State<HoldToFinishButton> createState() => _HoldToFinishButtonState();
+}
+
+class _HoldToFinishButtonState extends State<HoldToFinishButton> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  bool _isCompleted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1500));
+    _controller.addListener(() {
+      setState(() {}); 
+      if (_controller.isCompleted && !_isCompleted) {
+        _isCompleted = true;
+        Vibration.vibrate(duration: 100); 
+        widget.onComplete();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) { if (!_isCompleted) _controller.forward(); },
+      onTapUp: (_) { if (!_isCompleted) _controller.reverse(); },
+      onTapCancel: () { if (!_isCompleted) _controller.reverse(); },
+      child: Container(
+        height: 56, width: double.infinity,
+        decoration: BoxDecoration(color: Colors.red[900], borderRadius: BorderRadius.circular(100)),
+        child: Stack(
+          children: [
+            FractionallySizedBox(
+              widthFactor: _controller.value,
+              child: Container(decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(100))),
+            ),
+            Center(child: Text(_controller.isAnimating ? 'KEEP HOLDING...' : 'HOLD TO FINISH', style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold, letterSpacing: 1))),
+          ],
+        ),
+      ),
     );
   }
 }
