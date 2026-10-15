@@ -198,37 +198,52 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
     }
   }
 
+  // UPDATED TO SUPPORT MULTIPLE IMAGES
   Future<void> _uploadGalleryPhoto() async {
     if (widget.trek['id'] == 'imported_gpx') return;
 
     final picker = ImagePicker();
-    final image = await picker.pickImage(source: ImageSource.gallery, imageQuality: 80);
-    if (image == null) return;
+    // Allow users to select multiple photos at once
+    final List<XFile> images = await picker.pickMultiImage(imageQuality: 80);
+    if (images.isEmpty) return;
 
     setState(() => _isLoadingSocial = true);
     
     try {
-      final file = File(image.path);
-      final ext = image.path.split('.').last.toLowerCase();
-      final fileName = '${DateTime.now().millisecondsSinceEpoch}_${widget.trek['id']}.$ext';
+      List<String> uploadedUrls = [];
+      
+      for (var image in images) {
+        final file = File(image.path);
+        final ext = image.path.split('.').last.toLowerCase();
+        final fileName = '${DateTime.now().millisecondsSinceEpoch}_${widget.trek['id']}_${images.indexOf(image)}.$ext';
 
-      await Supabase.instance.client.storage.from('TrailImages').upload(fileName, file);
-      final publicUrl = Supabase.instance.client.storage.from('TrailImages').getPublicUrl(fileName);
+        await Supabase.instance.client.storage.from('TrailImages').upload(fileName, file);
+        final publicUrl = Supabase.instance.client.storage.from('TrailImages').getPublicUrl(fileName);
 
-      await Supabase.instance.client.from('trek_gallery').insert({
-        'trek_id': widget.trek['id'],
-        'user_id': Supabase.instance.client.auth.currentUser!.id,
-        'image_url': publicUrl
-      });
+        await Supabase.instance.client.from('trek_gallery').insert({
+          'trek_id': widget.trek['id'],
+          'user_id': Supabase.instance.client.auth.currentUser!.id,
+          'image_url': publicUrl
+        });
+        
+        uploadedUrls.add(publicUrl);
+      }
 
+      // Update the main cover photo if it's currently empty
       final currentCover = widget.trek['image_url'] ?? '';
       if (currentCover.contains('unsplash.com') || currentCover.isEmpty || _gallery.isEmpty) {
-        await Supabase.instance.client.from('public_treks').update({'image_url': publicUrl}).eq('id', widget.trek['id']);
-        setState(() => widget.trek['image_url'] = publicUrl);
+        // Pointing to completed_treks!
+        await Supabase.instance.client.from('completed_treks').update({'image_url': uploadedUrls.first}).eq('id', widget.trek['id']);
+        setState(() => widget.trek['image_url'] = uploadedUrls.first);
       }
 
       await _fetchSocialData();
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Photo added to gallery!'), backgroundColor: Colors.green));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(images.length == 1 ? 'Photo added to gallery!' : '${images.length} photos added!'), 
+          backgroundColor: Colors.green
+        ));
+      }
     } catch(e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Upload failed: $e'), backgroundColor: Colors.redAccent));
     } finally {
@@ -298,7 +313,8 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                 onTap: () async {
                   Navigator.pop(ctx);
                   try {
-                    await Supabase.instance.client.from('public_treks').update({'image_url': imageUrl}).eq('id', widget.trek['id']);
+                    // Pointing to completed_treks!
+                    await Supabase.instance.client.from('completed_treks').update({'image_url': imageUrl}).eq('id', widget.trek['id']);
                     setState(() => widget.trek['image_url'] = imageUrl);
                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cover photo updated!'), backgroundColor: Colors.green));
                   } catch(e) {
@@ -392,8 +408,9 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
                         }
                       }
 
-                      await Supabase.instance.client.from('public_treks').update({
-                        'name': nameCtrl.text.trim(),
+                      // Pointing to completed_treks!
+                      await Supabase.instance.client.from('completed_treks').update({
+                        'trek_name': nameCtrl.text.trim(),
                         'tags': formattedTags,
                       }).eq('id', widget.trek['id']);
 
@@ -449,10 +466,8 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
       List<LatLng> pts = [];
       final routeData = widget.trek['route_geojson'] ?? widget.trek['route_geom'];
       
-      if (routeData == null) return;
-
-      if (routeData is String) {
-        if (routeData.contains('LINESTRING')) {
+      if (routeData != null) {
+        if (routeData is String && routeData.contains('LINESTRING')) {
           final cleaned = routeData.replaceAll(RegExp(r'SRID=\d+;'), '').replaceAll('LINESTRING(', '').replaceAll(')', '');
           final pairs = cleaned.split(',');
           for (var pair in pairs) {
@@ -464,13 +479,28 @@ class _TrailDetailScreenState extends State<TrailDetailScreen> {
             }
           }
         } else {
-          final decoded = jsonDecode(routeData);
-          final coordinates = decoded['coordinates'] ?? decoded['geometry']?['coordinates'] ?? [];
-          pts = coordinates.map<LatLng>((c) => LatLng(c[1] as double, c[0] as double)).toList();
+          dynamic parsed = routeData;
+          if (routeData is String) {
+            try { parsed = jsonDecode(routeData); } catch (_) {}
+          }
+          
+          if (parsed is List) {
+            for (var p in parsed) {
+              if (p is Map) {
+                final lat = (p['lat'] as num?)?.toDouble();
+                final lng = (p['lng'] as num?)?.toDouble();
+                if (lat != null && lng != null) pts.add(LatLng(lat, lng));
+              } else if (p is List && p.length >= 2) {
+                pts.add(LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble()));
+              }
+            }
+          } else if (parsed is Map) {
+            final coordinates = parsed['coordinates'] ?? parsed['geometry']?['coordinates'] ?? [];
+            for (var c in coordinates) {
+              if (c is List && c.length >= 2) pts.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+            }
+          }
         }
-      } else if (routeData is Map) {
-        final coordinates = routeData['coordinates'] ?? routeData['geometry']?['coordinates'] ?? [];
-        pts = coordinates.map<LatLng>((c) => LatLng(c[1] as double, c[0] as double)).toList();
       }
 
       if (pts.isNotEmpty && _mapController != null) {
@@ -918,8 +948,8 @@ class _FullscreenRouteMapScreenState extends State<FullscreenRouteMapScreen> {
       final routeData = widget.trek['route_geojson'] ?? widget.trek['route_geom'];
       if (routeData == null) return;
 
-      if (routeData is String) {
-        if (routeData.contains('LINESTRING')) {
+      if (routeData != null) {
+        if (routeData is String && routeData.contains('LINESTRING')) {
           final cleaned = routeData.replaceAll(RegExp(r'SRID=\d+;'), '').replaceAll('LINESTRING(', '').replaceAll(')', '');
           final pairs = cleaned.split(',');
           for (var pair in pairs) {
@@ -931,13 +961,28 @@ class _FullscreenRouteMapScreenState extends State<FullscreenRouteMapScreen> {
             }
           }
         } else {
-          final decoded = jsonDecode(routeData);
-          final coordinates = decoded['coordinates'] ?? decoded['geometry']?['coordinates'] ?? [];
-          pts = coordinates.map<LatLng>((c) => LatLng(c[1] as double, c[0] as double)).toList();
+          dynamic parsed = routeData;
+          if (routeData is String) {
+            try { parsed = jsonDecode(routeData); } catch (_) {}
+          }
+          
+          if (parsed is List) {
+            for (var p in parsed) {
+              if (p is Map) {
+                final lat = (p['lat'] as num?)?.toDouble();
+                final lng = (p['lng'] as num?)?.toDouble();
+                if (lat != null && lng != null) pts.add(LatLng(lat, lng));
+              } else if (p is List && p.length >= 2) {
+                pts.add(LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble()));
+              }
+            }
+          } else if (parsed is Map) {
+            final coordinates = parsed['coordinates'] ?? parsed['geometry']?['coordinates'] ?? [];
+            for (var c in coordinates) {
+              if (c is List && c.length >= 2) pts.add(LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+            }
+          }
         }
-      } else if (routeData is Map) {
-        final coordinates = routeData['coordinates'] ?? routeData['geometry']?['coordinates'] ?? [];
-        pts = coordinates.map<LatLng>((c) => LatLng(c[1] as double, c[0] as double)).toList();
       }
 
       if (pts.isNotEmpty && _mapController != null) {

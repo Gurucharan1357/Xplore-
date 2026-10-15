@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'package:xplore_mobile/screens/feed_screen.dart'; // NEW IMPORT
 import 'package:xplore_mobile/screens/explore_screen.dart';
 import 'package:xplore_mobile/screens/my_dashboard_screen.dart' hide PublicProfileScreen;
 import 'package:xplore_mobile/services/tracking_service.dart';
@@ -12,10 +13,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // LOAD THE ENV FILE HERE
   await dotenv.load(fileName: ".env");
-
-  // WE ARE BACK IN BUSINESS!
   await initializeTrackingService();
 
   await Supabase.initialize(
@@ -133,23 +131,22 @@ class RootNavigationShell extends StatefulWidget {
   @override
   State<RootNavigationShell> createState() => _RootNavigationShellState();
 }
-
 class _RootNavigationShellState extends State<RootNavigationShell> {
-  int _currentIndex = 1; 
+  int _currentIndex = 0; 
   Map<String, dynamic>? _selectedTrekToFollow;
-  DateTime? _lastQuitTime; // Tracks the last back button press
+  DateTime? _lastQuitTime; 
 
   void _onSelectTrekFromExplore(Map<String, dynamic> trek) {
     setState(() {
       _selectedTrekToFollow = trek;
-      _currentIndex = 1; 
+      _currentIndex = 2; // Jump to Record screen
     });
   }
 
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      canPop: false, // Prevents default back behavior
+      canPop: false, 
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
         
@@ -164,17 +161,16 @@ class _RootNavigationShellState extends State<RootNavigationShell> {
                 style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
               ),
               duration: const Duration(seconds: 2),
-              backgroundColor: Colors.black.withOpacity(0.7), // Translucent background
-              behavior: SnackBarBehavior.floating, // Makes it float
+              backgroundColor: Colors.black.withOpacity(0.7), 
+              behavior: SnackBarBehavior.floating, 
               elevation: 0,
-              margin: const EdgeInsets.only(bottom: 120, left: 60, right: 60), // Lifts it above the Start button
+              margin: const EdgeInsets.only(bottom: 120, left: 60, right: 60), 
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(30), // Pill shape
+                borderRadius: BorderRadius.circular(30), 
               ),
             ),
           );
         } else {
-          // Exit the app if pressed twice within 2 seconds
           SystemNavigator.pop();
         }
       },
@@ -182,15 +178,17 @@ class _RootNavigationShellState extends State<RootNavigationShell> {
         body: IndexedStack(
           index: _currentIndex,
           children: [
-            ExploreScreen(onSelectTrek: _onSelectTrekFromExplore),
-            RecordScreen(trekToFollow: _selectedTrekToFollow),
-            MyDashboardScreen(onSelectTrek: _onSelectTrekFromExplore),
+            const FeedScreen(), 
+            ExploreScreen(onSelectTrek: _onSelectTrekFromExplore), 
+            RecordScreen(trekToFollow: _selectedTrekToFollow), 
+            MyDashboardScreen(onSelectTrek: _onSelectTrekFromExplore), 
           ],
         ),
         bottomNavigationBar: ValueListenableBuilder<bool>(
           valueListenable: RecordScreen.isNavHidden,
           builder: (context, isHidden, child) {
-            if (isHidden) return const SizedBox.shrink();
+            // FIX: Only hide the navigation bar if the Record Screen (index 2) is actually selected!
+            if (isHidden && _currentIndex == 2) return const SizedBox.shrink();
             
             return NavigationBar(
               backgroundColor: const Color(0xFF12141C),
@@ -198,6 +196,7 @@ class _RootNavigationShellState extends State<RootNavigationShell> {
               selectedIndex: _currentIndex,
               onDestinationSelected: (idx) => setState(() => _currentIndex = idx),
               destinations: const [
+                NavigationDestination(icon: Icon(Icons.home_outlined, color: Colors.grey), selectedIcon: Icon(Icons.home, color: Color(0xFFD4FF00)), label: 'Home'),
                 NavigationDestination(icon: Icon(Icons.explore_outlined, color: Colors.grey), selectedIcon: Icon(Icons.explore, color: Color(0xFFD4FF00)), label: 'Explore'),
                 NavigationDestination(icon: Icon(Icons.radio_button_checked, color: Colors.grey), selectedIcon: Icon(Icons.radio_button_checked, color: Color(0xFFD4FF00)), label: 'Record'),
                 NavigationDestination(icon: Icon(Icons.person_outline, color: Colors.grey), selectedIcon: Icon(Icons.person, color: Color(0xFFD4FF00)), label: 'Profile'),

@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data'; 
-import 'dart:ui' as ui;   
+import 'dart:ui' as ui;
+import 'dart:io';   
 import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:geolocator/geolocator.dart';
@@ -11,7 +12,7 @@ import 'package:vibration/vibration.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart'; 
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:xplore_mobile/screens/notifications_screen.dart';
+import 'package:image_picker/image_picker.dart';
 
 String get MAPBOX_ACCESS_TOKEN => dotenv.env['MAPBOX_ACCESS_TOKEN'] ?? '';
 
@@ -53,59 +54,19 @@ class _RecordScreenState extends State<RecordScreen> {
   List<mt.LatLng> _actualRecordedPoints = []; 
   
   bool _isOffRoute = false;
-  
-  // Real Notification State
-  int _unreadCount = 0; 
+  bool _isSaving = false;
 
   @override
   void initState() {
     super.initState();
     _restoreRecordingState();
-    _fetchUnreadNotifications();
-  }
-
-  // Fetch actual unread count from Supabase
-  Future<void> _fetchUnreadNotifications() async {
-    try {
-      final user = Supabase.instance.client.auth.currentUser;
-      if (user == null) return;
-      
-      final res = await Supabase.instance.client
-          .from('user_notifications')
-          .select('id')
-          .eq('user_id', user.id)
-          .eq('is_read', false);
-
-      if (mounted) {
-        setState(() {
-          _unreadCount = (res as List).length;
-        });
-      }
-    } catch (e) {
-      debugPrint("Error fetching unread count: $e");
-    }
-  }
-
-  // Open screen and clear badge on return
-  Future<void> _openNotifications() async {
-    await Navigator.push(
-      context, 
-      MaterialPageRoute(builder: (context) => const NotificationsScreen()),
-    );
-    
-    // NotificationsScreen marks all as read when loaded; update count immediately
-    if (mounted) {
-      setState(() => _unreadCount = 0);
-    }
   }
 
   @override
   void didUpdateWidget(RecordScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.trekToFollow != oldWidget.trekToFollow && widget.trekToFollow != null) {
-      Future.delayed(const Duration(milliseconds: 300), () {
-        _drawTrekRoute();
-      });
+      Future.delayed(const Duration(milliseconds: 300), () => _drawTrekRoute());
     }
   }
 
@@ -160,15 +121,7 @@ class _RecordScreenState extends State<RecordScreen> {
           try {
             await _mapController!.setGeoJsonSource("walked-source", {
               "type": "FeatureCollection",
-              "features": [
-                {
-                  "type": "Feature",
-                  "geometry": {
-                    "type": "LineString",
-                    "coordinates": _actualRecordedPoints.map((p) => [p.longitude, p.latitude]).toList()
-                  }
-                }
-              ]
+              "features": [{"type": "Feature", "geometry": {"type": "LineString", "coordinates": _actualRecordedPoints.map((p) => [p.longitude, p.latitude]).toList()}}]
             });
           } catch (_) {}
         }
@@ -192,10 +145,7 @@ class _RecordScreenState extends State<RecordScreen> {
           final endPoint = _routeGeometryPoints.last;
           final distToEnd = mt.SphericalUtil.computeDistanceBetween(currentLoc, endPoint);
           if (distToEnd < 15.0 && _isRecording && !_isPaused) {
-            setState(() {
-              _isPaused = true;
-              _isHudExpanded = true;
-            });
+            setState(() { _isPaused = true; _isHudExpanded = true; });
             _stopwatchTimer?.cancel();
             Vibration.vibrate(pattern: [300, 150, 300]);
             if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Destination reached! Hold Finish to save.'), backgroundColor: neonAccent, duration: Duration(seconds: 4)));
@@ -210,18 +160,27 @@ class _RecordScreenState extends State<RecordScreen> {
     _recenterMap();
   }
 
-  void _onStyleLoaded() {
-    _drawTrekRoute();
+  void _onStyleLoaded() async {
+    if (_mapController == null) return;
+    
+    try {
+      await _mapController!.addSource("walked-source", const GeojsonSourceProperties(data: {"type": "FeatureCollection", "features": []}));
+      await _mapController!.addLineLayer("walked-source", "walked-glow", const LineLayerProperties(lineColor: "#D4FF00", lineWidth: 14.0, lineOpacity: 0.4, lineBlur: 4.0, lineCap: "round", lineJoin: "round"));
+      await _mapController!.addLineLayer("walked-source", "walked-layer", const LineLayerProperties(lineColor: "#AADD00", lineWidth: 6.0, lineCap: "round", lineJoin: "round"));
+    } catch (e) {
+      debugPrint("Error initializing walked layer: $e");
+    }
+
+    if (widget.trekToFollow != null) {
+      _drawTrekRoute();
+    }
   }
 
   Future<Uint8List> _generateIconBytes(IconData icon, Color color) async {
     final pictureRecorder = ui.PictureRecorder();
     final canvas = Canvas(pictureRecorder);
     final textPainter = TextPainter(textDirection: TextDirection.ltr);
-    textPainter.text = TextSpan(
-      text: String.fromCharCode(icon.codePoint),
-      style: TextStyle(fontSize: 100.0, fontFamily: icon.fontFamily, package: icon.fontPackage, color: color),
-    );
+    textPainter.text = TextSpan(text: String.fromCharCode(icon.codePoint), style: TextStyle(fontSize: 100.0, fontFamily: icon.fontFamily, package: icon.fontPackage, color: color));
     textPainter.layout();
     textPainter.paint(canvas, const Offset(0.0, 0.0));
     final picture = pictureRecorder.endRecording();
@@ -235,69 +194,35 @@ class _RecordScreenState extends State<RecordScreen> {
     dynamic geojsonData = widget.trekToFollow!['route_geom'];
     if (geojsonData == null) return;
 
-    if (geojsonData is String) {
-      try { geojsonData = jsonDecode(geojsonData); } catch (_) { return; }
-    }
-
+    if (geojsonData is String) try { geojsonData = jsonDecode(geojsonData); } catch (_) { return; }
     if (geojsonData is Map<String, dynamic> && geojsonData['coordinates'] != null) {
       _routeGeometryPoints.clear();
-      for (var coord in geojsonData['coordinates']) {
-        _routeGeometryPoints.add(mt.LatLng(coord[1], coord[0]));
-      }
+      for (var coord in geojsonData['coordinates']) { _routeGeometryPoints.add(mt.LatLng(coord[1], coord[0])); }
     }
-
     if (geojsonData is Map<String, dynamic> && geojsonData['type'] == 'LineString') {
       geojsonData = {"type": "FeatureCollection", "features": [{"type": "Feature","properties": {},"geometry": geojsonData}]};
     }
 
     try {
-      try { await _mapController!.removeLayer("walked-glow"); } catch (_) {}
-      try { await _mapController!.removeLayer("walked-layer"); } catch (_) {}
-      try { await _mapController!.removeSource("walked-source"); } catch (_) {}
       try { await _mapController!.removeLayer("trek-arrows"); } catch (_) {} 
       try { await _mapController!.removeLayer("trek-layer"); } catch (_) {}
       try { await _mapController!.removeLayer("trek-casing"); } catch (_) {}
       try { await _mapController!.removeSource("trek-source"); } catch (_) {}
       
       final markerLayers = ['start-glow', 'start-border', 'start-core', 'end-glow', 'end-border', 'end-core'];
-      for (var layer in markerLayers) {
-        try { await _mapController!.removeLayer(layer); } catch (_) {}
-      }
+      for (var layer in markerLayers) { try { await _mapController!.removeLayer(layer); } catch (_) {} }
       try { await _mapController!.removeSource("start-source"); } catch (_) {}
       try { await _mapController!.removeSource("end-source"); } catch (_) {}
 
       await _mapController!.addSource("trek-source", GeojsonSourceProperties(data: geojsonData));
-      
-      await _mapController!.addLineLayer("trek-source", "trek-casing", const LineLayerProperties(
-        lineColor: "#FFFFFF", lineWidth: 10.0, lineCap: "round", lineJoin: "round",
-      ));
-      
-      await _mapController!.addLineLayer("trek-source", "trek-layer", const LineLayerProperties(
-        lineColor: "#888888", lineWidth: 6.0, lineCap: "round", lineJoin: "round",
-      ));
+      await _mapController!.addLineLayer("trek-source", "trek-casing", const LineLayerProperties(lineColor: "#FFFFFF", lineWidth: 10.0, lineCap: "round", lineJoin: "round"));
+      await _mapController!.addLineLayer("trek-source", "trek-layer", const LineLayerProperties(lineColor: "#888888", lineWidth: 6.0, lineCap: "round", lineJoin: "round"));
 
       try {
         final Uint8List arrowBytes = await _generateIconBytes(Icons.chevron_right_rounded, Colors.white70);
         await _mapController!.addImage("route-arrow", arrowBytes);
-        await _mapController!.addSymbolLayer("trek-source", "trek-arrows", const SymbolLayerProperties(
-          symbolPlacement: "line",    
-          symbolSpacing: 75.0,        
-          iconImage: "route-arrow",
-          iconSize: 0.35,             
-          iconAllowOverlap: true,
-          iconIgnorePlacement: false,
-        ));
+        await _mapController!.addSymbolLayer("trek-source", "trek-arrows", const SymbolLayerProperties(symbolPlacement: "line", symbolSpacing: 75.0, iconImage: "route-arrow", iconSize: 0.35, iconAllowOverlap: true, iconIgnorePlacement: false));
       } catch (_) {}
-
-      await _mapController!.addSource("walked-source", const GeojsonSourceProperties(data: {"type": "FeatureCollection", "features": []}));
-      
-      await _mapController!.addLineLayer("walked-source", "walked-glow", const LineLayerProperties(
-        lineColor: "#D4FF00", lineWidth: 14.0, lineOpacity: 0.4, lineBlur: 4.0, lineCap: "round", lineJoin: "round",
-      ));
-
-      await _mapController!.addLineLayer("walked-source", "walked-layer", const LineLayerProperties(
-        lineColor: "#AADD00", lineWidth: 6.0, lineCap: "round", lineJoin: "round",
-      ));
 
       if (_routeGeometryPoints.isNotEmpty) {
         final start = _routeGeometryPoints.first;
@@ -325,22 +250,13 @@ class _RecordScreenState extends State<RecordScreen> {
       _mapController!.updateMyLocationTrackingMode(MyLocationTrackingMode.trackingCompass);
       try {
         Position position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-        _mapController!.animateCamera(
-          CameraUpdate.newLatLngZoom(
-            LatLng(position.latitude, position.longitude), 
-            16.5, 
-          ),
-        );
-      } catch (e) {
-        debugPrint("Error recentering map: $e");
-      }
+        _mapController!.animateCamera(CameraUpdate.newLatLngZoom(LatLng(position.latitude, position.longitude), 16.5));
+      } catch (e) { debugPrint("Error recentering map: $e"); }
     }
   }
 
   void _resetCompass() {
-    if (_mapController != null) {
-      _mapController!.animateCamera(CameraUpdate.bearingTo(0.0));
-    }
+    if (_mapController != null) _mapController!.animateCamera(CameraUpdate.bearingTo(0.0));
   }
 
   void _startStopwatch() {
@@ -376,7 +292,6 @@ class _RecordScreenState extends State<RecordScreen> {
       });
 
       _recenterMap(); 
-
       final service = FlutterBackgroundService();
       await service.startService();
       _startStopwatch();
@@ -391,7 +306,7 @@ class _RecordScreenState extends State<RecordScreen> {
     }
   }
 
-  Future<void> _finishTrek() async {
+  Future<void> _cleanupRecordingState() async {
     _stopwatchTimer?.cancel();
     _serviceSubscription?.cancel();
     FlutterBackgroundService().invoke("stopService");
@@ -400,51 +315,226 @@ class _RecordScreenState extends State<RecordScreen> {
     await prefs.remove('is_recording');
     await prefs.remove('start_time');
 
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saving trek data...'), duration: Duration(seconds: 1)));
+    setState(() {
+      _isRecording = false;
+      _isPaused = false;
+      _isHudExpanded = false; 
+      _isOffRoute = false; 
+      RecordScreen.isNavHidden.value = false; 
+      _elapsedSeconds = 0;
+      _elapsedTime = "00:00:00";
+      _distance = "0.00";
+      _pace = "--:--";
+      _elevation = "0";
+      _actualRecordedPoints.clear();
+    });
 
     try {
-      final List<Map<String, double>> routeJson = _actualRecordedPoints
-          .map((point) => {'lat': point.latitude, 'lng': point.longitude})
-          .toList();
-      
+      await _mapController!.setGeoJsonSource("walked-source", const {"type": "FeatureCollection", "features": []});
+    } catch (_) {}
+
+    _mapController?.animateCamera(CameraUpdate.tiltTo(0.0));
+    _mapController?.animateCamera(CameraUpdate.zoomTo(14.0));
+  }
+
+  void _discardTrek() async {
+    await _cleanupRecordingState();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Trail discarded.'), backgroundColor: Colors.grey));
+    }
+  }
+
+  void _showFinishSheet() {
+    setState(() => _isPaused = true);
+    _stopwatchTimer?.cancel();
+    
+    final nameCtrl = TextEditingController(text: widget.trekToFollow?['name'] ?? 'Freestyle Walk');
+    final descCtrl = TextEditingController();
+    File? selectedImage;
+    _isSaving = false;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: cardSurface,
+      isScrollControlled: true, 
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          Future<void> pickImage() async {
+            final picker = ImagePicker();
+            final pickedFile = await picker.pickImage(source: ImageSource.gallery, imageQuality: 80);
+            if (pickedFile != null) {
+              setSheetState(() => selectedImage = File(pickedFile.path));
+            }
+          }
+
+          return Padding(
+            padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, left: 24, right: 24, top: 24),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Finish Trek', style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 24),
+                  
+                  const Text('Trail Name', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: nameCtrl,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      filled: true, fillColor: bgColor,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  const Text('Description', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: descCtrl,
+                    maxLines: 3,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      hintText: 'How was the trail? Trail conditions, scenery...',
+                      hintStyle: const TextStyle(color: Colors.white30),
+                      filled: true, fillColor: bgColor,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  GestureDetector(
+                    onTap: pickImage,
+                    child: Container(
+                      height: 140,
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        color: bgColor,
+                        borderRadius: BorderRadius.circular(12),
+                        image: selectedImage != null ? DecorationImage(image: FileImage(selectedImage!), fit: BoxFit.cover) : null,
+                      ),
+                      child: selectedImage == null 
+                        ? const Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.add_a_photo, color: neonAccent, size: 32),
+                              SizedBox(height: 8),
+                              Text('Add Cover Photo', style: TextStyle(color: neonAccent, fontWeight: FontWeight.bold)),
+                            ],
+                          )
+                        : Align(
+                            alignment: Alignment.topRight,
+                            child: Padding(
+                              padding: const EdgeInsets.all(8.0),
+                              child: CircleAvatar(
+                                backgroundColor: Colors.black54,
+                                child: IconButton(
+                                  icon: const Icon(Icons.close, color: Colors.white, size: 18),
+                                  onPressed: () => setSheetState(() => selectedImage = null),
+                                ),
+                              ),
+                            ),
+                          ),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blueAccent.withOpacity(0.2), 
+                            foregroundColor: Colors.blueAccent, 
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            elevation: 0,
+                            side: const BorderSide(color: Colors.blueAccent)
+                          ),
+                          onPressed: _isSaving ? null : () => _processSave(ctx, setSheetState, nameCtrl.text.trim(), descCtrl.text.trim(), selectedImage, false),
+                          icon: const Icon(Icons.lock_outline),
+                          label: const Text('Private'),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: neonAccent, 
+                            foregroundColor: Colors.black, 
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            elevation: 0
+                          ),
+                          onPressed: _isSaving ? null : () => _processSave(ctx, setSheetState, nameCtrl.text.trim(), descCtrl.text.trim(), selectedImage, true),
+                          icon: const Icon(Icons.public),
+                          label: const Text('Public', style: TextStyle(fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                  
+                  Center(
+                    child: TextButton.icon(
+                      onPressed: _isSaving ? null : () {
+                        Navigator.pop(ctx);
+                        _discardTrek();
+                      }, 
+                      icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                      label: const Text('Discard Trail', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                ],
+              ),
+            ),
+          );
+        }
+      )
+    );
+  }
+
+  Future<void> _processSave(BuildContext sheetCtx, void Function(void Function()) setSheetState, String name, String description, File? imageFile, bool isPublic) async {
+    setSheetState(() => _isSaving = true); 
+    try {
+      String? imageUrl;
       final myId = Supabase.instance.client.auth.currentUser!.id;
+
+      if (imageFile != null) {
+        final ext = imageFile.path.split('.').last.toLowerCase();
+        final fileName = '${DateTime.now().millisecondsSinceEpoch}_$myId.$ext';
+        await Supabase.instance.client.storage.from('TrailImages').upload(fileName, imageFile);
+        imageUrl = Supabase.instance.client.storage.from('TrailImages').getPublicUrl(fileName);
+      }
+
+      final List<Map<String, double>> routeJson = _actualRecordedPoints.map((point) => {'lat': point.latitude, 'lng': point.longitude}).toList();
 
       await Supabase.instance.client.from('completed_treks').insert({
         'user_id': myId,
-        'trek_name': widget.trekToFollow?['name'] ?? 'Freestyle Trek',
+        'trek_name': name.isEmpty ? 'Freestyle Walk' : name,
+        'description': description,
+        'image_url': imageUrl,
         'distance': _distance,
         'duration': _elapsedTime,
         'pace': _pace,
         'elevation_gain': _elevation,
         'recorded_route': routeJson,
+        'is_public': isPublic, 
       });
 
-      setState(() {
-        _isRecording = false;
-        _isPaused = false;
-        _isHudExpanded = false; 
-        _isOffRoute = false; 
-        RecordScreen.isNavHidden.value = false; 
-        _elapsedSeconds = 0;
-        _elapsedTime = "00:00:00";
-        _distance = "0.00";
-        _pace = "--:--";
-        _elevation = "0";
-        _actualRecordedPoints.clear();
-      });
-
-      try {
-        await _mapController!.setGeoJsonSource("walked-source", const {"type": "FeatureCollection", "features": []});
-      } catch (_) {}
-
-      _mapController?.animateCamera(CameraUpdate.tiltTo(0.0));
-      _mapController?.animateCamera(CameraUpdate.zoomTo(14.0));
-
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Trek Finished & Saved to Profile!'), backgroundColor: Colors.green));
-      
+      if (mounted) {
+        Navigator.pop(sheetCtx);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(isPublic ? 'Trail published to Explore!' : 'Saved to your Private Profile!'), backgroundColor: Colors.green));
+      }
+      await _cleanupRecordingState();
     } catch (e) {
       debugPrint("Error saving trek: $e");
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to save trek: $e'), backgroundColor: Colors.red));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to save trek: $e'), backgroundColor: Colors.red));
+    } finally {
+      if (mounted) setSheetState(() => _isSaving = false); 
     }
   }
 
@@ -518,8 +608,7 @@ class _RecordScreenState extends State<RecordScreen> {
           ),
           Positioned(
             top: MediaQuery.of(context).padding.top + 16,
-            left: 16,
-            right: 16,
+            left: 16, right: 16,
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -543,49 +632,6 @@ class _RecordScreenState extends State<RecordScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     GestureDetector(
-                      onTap: _openNotifications, // DYNAMIC BADGE LOGIC
-                      child: Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.7), 
-                          shape: BoxShape.circle, 
-                          border: Border.all(color: Colors.white10),
-                        ),
-                        child: Stack(
-                          clipBehavior: Clip.none,
-                          children: [
-                            const Icon(Icons.notifications_none, color: Colors.white, size: 20),
-                            if (_unreadCount > 0)
-                              Positioned(
-                                top: -6, 
-                                right: -6,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: Colors.redAccent,
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                  constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
-                                  child: Center(
-                                    child: Text(
-                                      _unreadCount > 9 ? '9+' : '$_unreadCount',
-                                      style: const TextStyle(
-                                        color: Colors.white, 
-                                        fontSize: 9, 
-                                        fontWeight: FontWeight.bold, 
-                                        height: 1,
-                                      ),
-                                      textAlign: TextAlign.center,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    GestureDetector(
                       onTap: _resetCompass,
                       child: Container(
                         padding: const EdgeInsets.all(10),
@@ -599,9 +645,7 @@ class _RecordScreenState extends State<RecordScreen> {
             ),
           ),
           Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
+            left: 0, right: 0, bottom: 0,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
@@ -704,7 +748,7 @@ class _RecordScreenState extends State<RecordScreen> {
                                     if (_isPaused) ...[
                                       const SizedBox(width: 16),
                                       Expanded(
-                                        child: HoldToFinishButton(onComplete: _finishTrek),
+                                        child: HoldToFinishButton(onComplete: _showFinishSheet),
                                       ),
                                     ]
                                   ],
@@ -765,6 +809,8 @@ class _HoldToFinishButtonState extends State<HoldToFinishButton> with SingleTick
         _isCompleted = true;
         Vibration.vibrate(duration: 100); 
         widget.onComplete();
+        _controller.reverse(); 
+        _isCompleted = false; 
       }
     });
   }

@@ -36,7 +36,7 @@ class _NavigationScreenState extends State<NavigationScreen> {
   bool _isRecording = false;
   bool _isPaused = false;
   bool _isHudExpanded = false; 
-  bool _isReversed = false; // Tracks if the route direction is flipped
+  bool _isReversed = false; 
   String _currentMapStyle = styleDark; 
 
   Timer? _stopwatchTimer;
@@ -57,52 +57,77 @@ class _NavigationScreenState extends State<NavigationScreen> {
     _parseRouteData();
   }
 
+  // UPDATED BILINGUAL PARSING LOGIC
   void _parseRouteData() {
     _routeGeometryPoints.clear();
-    dynamic geojsonData = widget.trekToFollow['route_geom'];
-    if (geojsonData is String) {
-      try { geojsonData = jsonDecode(geojsonData); } catch (_) {}
-    }
-    if (geojsonData is Map<String, dynamic> && geojsonData['coordinates'] != null) {
-      for (var coord in geojsonData['coordinates']) {
-        _routeGeometryPoints.add(mt.LatLng(coord[1], coord[0]));
+    final routeData = widget.trekToFollow['route_geojson'] ?? widget.trekToFollow['route_geom'];
+
+    if (routeData != null) {
+      if (routeData is String && routeData.contains('LINESTRING')) {
+        final cleaned = routeData.replaceAll(RegExp(r'SRID=\d+;'), '').replaceAll('LINESTRING(', '').replaceAll(')', '');
+        final pairs = cleaned.split(',');
+        for (var pair in pairs) {
+          final coords = pair.trim().split(RegExp(r'\s+'));
+          if (coords.length >= 2) {
+            final lon = double.tryParse(coords[0]);
+            final lat = double.tryParse(coords[1]);
+            if (lon != null && lat != null) _routeGeometryPoints.add(mt.LatLng(lat, lon));
+          }
+        }
+      } else {
+        dynamic parsed = routeData;
+        if (routeData is String) {
+          try { parsed = jsonDecode(routeData); } catch (_) {}
+        }
+
+        if (parsed is List) {
+          for (var p in parsed) {
+            if (p is Map) {
+              final lat = (p['lat'] as num?)?.toDouble();
+              final lng = (p['lng'] as num?)?.toDouble();
+              if (lat != null && lng != null) _routeGeometryPoints.add(mt.LatLng(lat, lng));
+            } else if (p is List && p.length >= 2) {
+              _routeGeometryPoints.add(mt.LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble()));
+            }
+          }
+        } else if (parsed is Map) {
+          final coordinates = parsed['coordinates'] ?? parsed['geometry']?['coordinates'] ?? [];
+          for (var c in coordinates) {
+            if (c is List && c.length >= 2) _routeGeometryPoints.add(mt.LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()));
+          }
+        }
       }
     }
-    
-    // Reverse the sequence if the user toggled it
+
     if (_isReversed) {
       _routeGeometryPoints = _routeGeometryPoints.reversed.toList();
     }
   }
 
   void _toggleReverse() async {
-    if (_isRecording) return; // Lock direction once tracking starts
+    if (_isRecording) return; 
     Vibration.vibrate(duration: 50);
     
     setState(() {
       _isReversed = !_isReversed;
     });
     
-    _parseRouteData(); // Rebuilds the geometry list in reverse
+    _parseRouteData(); 
     
-    // Live update the map layers instantly
     if (_mapController != null && _routeGeometryPoints.isNotEmpty) {
       List<List<double>> coords = _routeGeometryPoints.map((p) => [p.longitude, p.latitude]).toList();
       
-      // Updates base line (and flips arrows automatically)
       await _mapController!.setGeoJsonSource("trek-source", {
         "type": "FeatureCollection",
         "features": [{"type": "Feature", "geometry": {"type": "LineString", "coordinates": coords}}]
       });
       
-      // Swap Start Node
       final start = _routeGeometryPoints.first;
       await _mapController!.setGeoJsonSource("start-source", {
         "type": "FeatureCollection",
         "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [start.longitude, start.latitude]}}]
       });
       
-      // Swap End Node
       final end = _routeGeometryPoints.last;
       await _mapController!.setGeoJsonSource("end-source", {
         "type": "FeatureCollection",
@@ -176,7 +201,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
             if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Back on route! Resumed.'), backgroundColor: Colors.green, duration: Duration(seconds: 2)));
           }
 
-          // Because _routeGeometryPoints flips when reversed, .last is ALWAYS the correct destination!
           final endPoint = _routeGeometryPoints.last;
           final distToEnd = mt.SphericalUtil.computeDistanceBetween(currentLoc, endPoint);
           if (distToEnd < 15.0 && _isRecording && !_isPaused) {
@@ -247,7 +271,6 @@ class _NavigationScreenState extends State<NavigationScreen> {
   void _onStyleLoaded() async {
     if (_mapController == null) return;
     
-    // Render based directly on _routeGeometryPoints so it respects reverse state
     List<List<double>> coords = _routeGeometryPoints.map((p) => [p.longitude, p.latitude]).toList();
     final routeGeoJson = {
       "type": "FeatureCollection",

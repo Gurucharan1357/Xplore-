@@ -15,11 +15,39 @@ class NotificationsScreen extends StatefulWidget {
 class _NotificationsScreenState extends State<NotificationsScreen> {
   List<dynamic> _notifications = [];
   bool _isLoading = true;
+  RealtimeChannel? _notificationChannel;
 
   @override
   void initState() {
     super.initState();
     _fetchNotifications();
+    _setupRealtime();
+  }
+
+  // Listens to the database and instantly refreshes if a new notification arrives
+  void _setupRealtime() {
+    final userId = Supabase.instance.client.auth.currentUser!.id;
+    _notificationChannel = Supabase.instance.client
+        .channel('public:user_notifications')
+        .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'user_notifications',
+            filter: PostgresChangeFilter(
+              type: PostgresChangeFilterType.eq,
+              column: 'user_id',
+              value: userId,
+            ),
+            callback: (payload) {
+              _fetchNotifications();
+            })
+        .subscribe();
+  }
+
+  @override
+  void dispose() {
+    _notificationChannel?.unsubscribe(); // Clean up the listener when closed
+    super.dispose();
   }
 
   Future<void> _fetchNotifications() async {

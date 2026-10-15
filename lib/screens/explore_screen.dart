@@ -1,19 +1,23 @@
 import 'dart:convert';
 import 'dart:io' show File;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:xml/xml.dart'; 
 import 'package:file_picker/file_picker.dart'; 
 import 'package:share_plus/share_plus.dart'; 
 import 'package:path_provider/path_provider.dart'; 
+import 'package:maplibre_gl/maplibre_gl.dart';
 
 import 'package:xplore_mobile/screens/trail_detail_screen.dart';
 import 'package:xplore_mobile/screens/public_profile_screen.dart';
+import 'package:xplore_mobile/widgets/global_search_delegate.dart';
 
 const Color neonAccent = Color(0xFFD4FF00);
 const Color cardSurface = Color(0xFF161922);
 const Color bgColor = Color(0xFF0F1115);
+const String styleDark = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 
 // ---------------------------------------------------------------------------
 // EXPLORE SCREEN
@@ -27,7 +31,7 @@ class ExploreScreen extends StatefulWidget {
 }
 
 class _ExploreScreenState extends State<ExploreScreen> {
-  List<dynamic> _treks = [];
+  List<Map<String, dynamic>> _treks = [];
   Set<String> _followingIds = {}; 
   bool _isLoading = true;
   String _feedMode = 'Nearby'; 
@@ -52,38 +56,104 @@ class _ExploreScreenState extends State<ExploreScreen> {
       final followData = await Supabase.instance.client.from('follows').select('following_id').eq('follower_id', userId);
       _followingIds = followData.map((e) => e['following_id'].toString()).toSet();
 
-      List<dynamic> data = [];
+      final rawTreks = await Supabase.instance.client
+          .from('completed_treks')
+          .select()
+          .order('created_at', ascending: false);
+
+      final creatorIds = rawTreks
+          .map((t) => t['user_id']?.toString())
+          .where((id) => id != null && id != 'null' && id.trim().isNotEmpty)
+          .toSet()
+          .toList();
+          
+      Map<String, dynamic> profileMap = {};
+      if (creatorIds.isNotEmpty) {
+        final profiles = await Supabase.instance.client.from('profiles').select('id, display_name, avatar_url').inFilter('id', creatorIds);
+        profileMap = { for (var p in profiles) p['id'].toString(): p };
+      }
+
+      Position? myPos;
       if (_feedMode == 'Nearby') {
-        final pos = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.medium));
-        data = await Supabase.instance.client.rpc('get_treks_near_me', params: {'user_lat': pos.latitude, 'user_lng': pos.longitude, 'radius_meters': _searchRadiusKm * 1000});
-      } else {
-        data = await Supabase.instance.client.rpc('get_following_treks', params: {'current_user_id': userId});
+        try { 
+          LocationPermission permission = await Geolocator.checkPermission();
+          if (permission == LocationPermission.denied) {
+            permission = await Geolocator.requestPermission();
+          }
+          if (permission != LocationPermission.denied && permission != LocationPermission.deniedForever) {
+            myPos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.medium); 
+          }
+        } catch (_) {}
       }
 
-      if (data.isNotEmpty) {
-        final creatorIds = data.map((t) => t['creator_id'].toString()).where((id) => id.isNotEmpty && id != 'my_android_device').toSet().toList();
-        if (creatorIds.isNotEmpty) {
-          final profiles = await Supabase.instance.client.from('profiles').select('id, display_name, avatar_url').inFilter('id', creatorIds);
-          final profileMap = { for (var p in profiles) p['id'].toString(): p };
-          data = data.map((trek) {
-            final cid = trek['creator_id']?.toString();
-            if (cid != null && profileMap.containsKey(cid)) {
-              final profile = profileMap[cid]!; 
-              trek['creator_name'] = profile['display_name'] ?? 'Athlete';
-              trek['creator_avatar'] = profile['avatar_url'];
+      List<Map<String, dynamic>> mappedTreks = [];
+      for (var t in rawTreks) {
+        if (t['is_public'] == false) continue;
+
+        final cid = t['user_id']?.toString();
+        final profile = profileMap[cid] ?? {};
+        
+        double? startLat; double? startLng;
+        final routeData = t['recorded_route'];
+        if (routeData != null) {
+          try {
+            if (routeData is String && routeData.contains('LINESTRING')) {
+               final cleaned = routeData.replaceAll(RegExp(r'SRID=\d+;'), '').replaceAll('LINESTRING(', '').replaceAll(')', '');
+               final coords = cleaned.split(',').first.trim().split(RegExp(r'\s+'));
+               if (coords.length >= 2) {
+                 startLng = double.tryParse(coords[0]);
+                 startLat = double.tryParse(coords[1]);
+               }
+            } else {
+              dynamic parsed = routeData is String ? jsonDecode(routeData) : routeData;
+              if (parsed is List && parsed.isNotEmpty) {
+                final first = parsed.first;
+                if (first is Map) { startLat = (first['lat'] as num).toDouble(); startLng = (first['lng'] as num).toDouble(); }
+                else if (first is List && first.length >= 2) { startLat = (first[1] as num).toDouble(); startLng = (first[0] as num).toDouble(); }
+              } else if (parsed is Map) {
+                 final coords = parsed['coordinates'] ?? parsed['geometry']?['coordinates'] ?? [];
+                 if (coords.isNotEmpty && coords.first is List && coords.first.length >= 2) {
+                   startLng = (coords.first[0] as num).toDouble();
+                   startLat = (coords.first[1] as num).toDouble();
+                 }
+              }
             }
-            return trek;
-          }).toList();
+          } catch (_) {}
         }
+
+        if (_feedMode == 'Following') {
+          if (!_followingIds.contains(cid) && cid != userId) continue;
+        } else if (_feedMode == 'Nearby') {
+          if (myPos != null && startLat != null && startLng != null) {
+            final distToTrek = Geolocator.distanceBetween(myPos.latitude, myPos.longitude, startLat, startLng);
+            if (distToTrek > (_searchRadiusKm * 1000)) continue; 
+          }
+        }
+
+        mappedTreks.add({
+          ...t,
+          'id': t['id'],
+          'creator_id': cid ?? '',
+          'creator_name': profile['display_name'] ?? 'Athlete',
+          'creator_avatar': profile['avatar_url'],
+          'name': t['trek_name'] ?? 'Wilderness Trek',
+          'distance_meters': (double.tryParse(t['distance']?.toString() ?? '0') ?? 0) * 1000,
+          'elevation_gain': double.tryParse(t['elevation_gain']?.toString() ?? '0') ?? 0,
+          'route_geom': routeData,
+        });
       }
 
-      if (mounted) setState(() { _treks = data; _isLoading = false; });
+      if (mounted) setState(() { _treks = mappedTreks; _isLoading = false; });
     } catch (e) {
+      debugPrint("Fetch Data Error: $e");
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _toggleFollow(String targetUserId) async {
+    if (targetUserId.isEmpty || targetUserId == 'null') return;
+    
+    HapticFeedback.lightImpact();
     final myId = Supabase.instance.client.auth.currentUser!.id;
     final isCurrentlyFollowing = _followingIds.contains(targetUserId);
 
@@ -95,14 +165,17 @@ class _ExploreScreenState extends State<ExploreScreen> {
     try {
       if (isCurrentlyFollowing) {
         await Supabase.instance.client.from('follows').delete().eq('follower_id', myId).eq('following_id', targetUserId);
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unfollowed athlete'), duration: Duration(seconds: 1)));
       } else {
         await Supabase.instance.client.from('follows').insert({'follower_id': myId, 'following_id': targetUserId});
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You are now following this athlete!'), backgroundColor: Colors.green, duration: Duration(seconds: 1)));
       }
-    } catch (_) {
+    } catch (e) {
       setState(() { 
         if (isCurrentlyFollowing) _followingIds.add(targetUserId);
         else _followingIds.remove(targetUserId);
       });
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to update follow status: $e'), backgroundColor: Colors.redAccent));
     }
   }
 
@@ -116,23 +189,14 @@ class _ExploreScreenState extends State<ExploreScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // TITLE AND RESET BUTTON
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   const Text('Advanced Filters', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
                   TextButton(
                     onPressed: () {
-                      setSheetState(() {
-                        _selectedDifficulty = 'All';
-                        _filterMaxDistanceKm = 50.0;
-                        _filterMaxElevationM = 3000.0;
-                      });
-                      setState(() {
-                        _selectedDifficulty = 'All';
-                        _filterMaxDistanceKm = 50.0;
-                        _filterMaxElevationM = 3000.0;
-                      });
+                      setSheetState(() { _selectedDifficulty = 'All'; _filterMaxDistanceKm = 50.0; _filterMaxElevationM = 3000.0; });
+                      setState(() { _selectedDifficulty = 'All'; _filterMaxDistanceKm = 50.0; _filterMaxElevationM = 3000.0; });
                     },
                     child: const Text('Reset', style: TextStyle(color: neonAccent, fontWeight: FontWeight.bold)),
                   )
@@ -189,7 +253,17 @@ class _ExploreScreenState extends State<ExploreScreen> {
         title: const Text('Discover', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)), 
         backgroundColor: bgColor, elevation: 0, iconTheme: const IconThemeData(color: Colors.white),
         actions: [
-          IconButton(icon: const Icon(Icons.search), tooltip: 'Search', onPressed: () => showSearch(context: context, delegate: GlobalSearchDelegate(onSelectTrek: widget.onSelectTrek))),
+          IconButton(
+            icon: const Icon(Icons.search), 
+            tooltip: 'Search', 
+            onPressed: () => showSearch(
+              context: context, 
+              delegate: GlobalSearchDelegate(
+                onSelectTrek: widget.onSelectTrek,
+                searchType: 'public_trails',
+              ),
+            ),
+          ),
           IconButton(icon: const Icon(Icons.tune), tooltip: 'Filters', onPressed: _showFilterSheet),
           IconButton(icon: const Icon(Icons.refresh), onPressed: _fetchData),
         ]
@@ -218,92 +292,204 @@ class _ExploreScreenState extends State<ExploreScreen> {
             Padding(padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0), child: Text('${filtered.length} trails matching filters', style: const TextStyle(color: Colors.grey, fontSize: 13, fontWeight: FontWeight.w600))),
             
             Expanded(
-              child: _isLoading ? const Center(child: CircularProgressIndicator(color: neonAccent)) : filtered.isEmpty ? ListView(children: [const SizedBox(height: 100), Center(child: Text(_feedMode == 'Nearby' ? 'No treks found nearby.\nTry expanding your radius or clearing filters!' : 'No treks yet.\nStart following other athletes!', textAlign: TextAlign.center, style: const TextStyle(color: Colors.grey)))]) : ListView.builder(
-                padding: const EdgeInsets.symmetric(horizontal: 16), itemCount: filtered.length,
-                itemBuilder: (context, index) {
-                  final trek = filtered[index];
-                  final distanceKm = ((trek['distance_meters'] as num) / 1000).toDouble();
-                  final elevGain = ((trek['elevation_gain'] as num?) ?? 0).toDouble();
-                  final difficulty = trek['difficulty'] ?? 'Moderate';
-                  final creatorId = trek['creator_id']?.toString() ?? '';
-                  final creatorName = trek['creator_name'] ?? 'Athlete';
-                  final creatorAvatar = trek['creator_avatar'];
-                  final imageUrl = trek['image_url'] ?? 'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=600&auto=format&fit=crop';
+              child: _isLoading 
+                ? const Center(child: CircularProgressIndicator(color: neonAccent)) 
+                : filtered.isEmpty 
+                  ? ListView(children: [const SizedBox(height: 100), Center(child: Text(_feedMode == 'Nearby' ? 'No treks found nearby.\nTry expanding your radius or clearing filters!' : 'No treks yet.\nStart following other athletes!', textAlign: TextAlign.center, style: const TextStyle(color: Colors.grey)))]) 
+                  : ListView.builder(
+                      padding: const EdgeInsets.symmetric(horizontal: 16), itemCount: filtered.length,
+                      itemBuilder: (context, index) {
+                        final trek = filtered[index];
+                        final creatorId = trek['creator_id']?.toString() ?? '';
+                        final isMyTrek = creatorId == myId;
+                        final isFollowing = _followingIds.contains(creatorId);
 
-                  final estHours = (distanceKm / 5.0) + (elevGain / 600.0);
-                  final estTimeStr = estHours < 1.0 ? '${(estHours * 60).round()} mins' : '${estHours.floor()}h ${((estHours % 1) * 60).round()}m';
+                        return _ExploreTrailCard(
+                          trek: trek,
+                          isMyTrek: isMyTrek,
+                          isFollowing: isFollowing,
+                          onToggleFollow: () => _toggleFollow(creatorId),
+                          onTap: () { Navigator.push(context, MaterialPageRoute(builder: (context) => TrailDetailScreen(trek: trek, onStartTrail: () => widget.onSelectTrek(trek)))); },
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
-                  Color badgeColor = difficulty == 'Hard' ? Colors.redAccent : (difficulty == 'Easy' ? Colors.green : Colors.orangeAccent);
-                  final isMyTrek = creatorId == myId;
-                  final isFollowing = _followingIds.contains(creatorId);
+// ---------------------------------------------------------------------------
+// VERTICAL EXPLORE CARD WIDGET WITH MAP OVERVIEW SUPPORT (CRASH-PROOF)
+// ---------------------------------------------------------------------------
+class _ExploreTrailCard extends StatefulWidget {
+  final Map<String, dynamic> trek;
+  final bool isMyTrek;
+  final bool isFollowing;
+  final VoidCallback onToggleFollow;
+  final VoidCallback onTap;
 
-                  return GestureDetector(
-                    onTap: () { Navigator.push(context, MaterialPageRoute(builder: (context) => TrailDetailScreen(trek: trek, onStartTrail: () => widget.onSelectTrek(trek)))); },
-                    child: Container(
-                      height: 240, margin: const EdgeInsets.only(bottom: 16), 
-                      decoration: BoxDecoration(color: cardSurface, borderRadius: BorderRadius.circular(20)),
-                      child: Stack(
-                        children: [
-                          // Background Image with Dark Gradient
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(20),
-                            child: ShaderMask(
-                              shaderCallback: (rect) => LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black.withValues(alpha: 0.95)], stops: const [0.2, 1.0]).createShader(rect),
-                              blendMode: BlendMode.darken,
-                              child: Image.network(imageUrl, height: double.infinity, width: double.infinity, fit: BoxFit.cover, errorBuilder: (c, e, s) => Container(color: bgColor, child: const Icon(Icons.terrain, color: Colors.white24, size: 48))),
-                            ),
-                          ),
-                          // Content
-                          Padding(
-                            padding: const EdgeInsets.all(16.0),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    GestureDetector(
-                                      onTap: () { if (creatorId.isNotEmpty && creatorId != 'my_android_device') Navigator.push(context, MaterialPageRoute(builder: (context) => PublicProfileScreen(userId: creatorId))); },
-                                      child: Row(children: [
-                                        Container(padding: const EdgeInsets.all(2), decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: neonAccent, width: 1.5)), child: CircleAvatar(radius: 14, backgroundImage: creatorAvatar != null ? NetworkImage(creatorAvatar) : null, backgroundColor: Colors.grey[800], child: creatorAvatar == null ? const Icon(Icons.person, size: 16, color: Colors.white) : null)), 
-                                        const SizedBox(width: 8), 
-                                        Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.6), borderRadius: BorderRadius.circular(8)), child: Text(creatorName, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)))
-                                      ]),
-                                    ),  
-                                    if (!isMyTrek)
-                                      GestureDetector(onTap: () => _toggleFollow(creatorId), child: Container(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6), decoration: BoxDecoration(color: isFollowing ? Colors.black.withValues(alpha: 0.6) : neonAccent, border: isFollowing ? Border.all(color: Colors.white30) : null, borderRadius: BorderRadius.circular(16)), child: Text(isFollowing ? 'Following' : 'Follow', style: TextStyle(color: isFollowing ? Colors.white : Colors.black, fontSize: 12, fontWeight: FontWeight.bold))))
-                                  ],
-                                ),
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(trek['name'] ?? 'Wilderness Trek', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 0.5)),
-                                    const SizedBox(height: 12),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.6), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white10)),
-                                      child: Row(
-                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                        children: [
-                                          _buildMiniStat(Icons.straighten, '${distanceKm.toStringAsFixed(1)} km'),
-                                          _buildMiniStat(Icons.trending_up, '${elevGain.toStringAsFixed(0)} m'),
-                                          _buildMiniStat(Icons.timer_outlined, estTimeStr),
-                                          Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: badgeColor.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(8), border: Border.all(color: badgeColor.withValues(alpha: 0.5))), child: Text(difficulty, style: TextStyle(color: badgeColor, fontSize: 11, fontWeight: FontWeight.bold))),
-                                        ],
-                                      ),
-                                    )
-                                  ],
-                                )
-                              ],
-                            ),
-                          ),
-                        ],
+  const _ExploreTrailCard({
+    required this.trek, required this.isMyTrek, required this.isFollowing, required this.onToggleFollow, required this.onTap
+  });
+
+  @override
+  State<_ExploreTrailCard> createState() => _ExploreTrailCardState();
+}
+
+class _ExploreTrailCardState extends State<_ExploreTrailCard> {
+  MapLibreMapController? _mapController;
+
+  void _onStyleLoaded() async {
+    if (_mapController == null) return;
+    try {
+      List<LatLng> pts = [];
+      final routeData = widget.trek['route_geom'] ?? widget.trek['route_geojson'];
+      if (routeData == null) return;
+
+      if (routeData is String) {
+        if (routeData.startsWith('0102') || routeData.startsWith('0101')) return; 
+        if (routeData.contains('LINESTRING')) {
+          final cleaned = routeData.replaceAll(RegExp(r'SRID=\d+;'), '').replaceAll('LINESTRING(', '').replaceAll(')', '');
+          final pairs = cleaned.split(',');
+          for (var pair in pairs) {
+            final coords = pair.trim().split(RegExp(r'\s+'));
+            if (coords.length >= 2) pts.add(LatLng(double.parse(coords[1]), double.parse(coords[0])));
+          }
+        } else {
+          final decoded = jsonDecode(routeData);
+          final coordinates = decoded['coordinates'] ?? decoded['geometry']?['coordinates'] ?? [];
+          pts = coordinates.map<LatLng>((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble())).toList();
+        }
+      } else if (routeData is Map) {
+        final coordinates = routeData['coordinates'] ?? routeData['geometry']?['coordinates'] ?? [];
+        pts = coordinates.map<LatLng>((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble())).toList();
+      } else if (routeData is List) {
+        pts = routeData.map<LatLng>((p) => p is Map ? LatLng((p['lat'] as num).toDouble(), (p['lng'] as num).toDouble()) : LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble())).toList();
+      }
+
+      if (pts.isNotEmpty) {
+        List<List<double>> coords = pts.map((p) => [p.longitude, p.latitude]).toList();
+        final routeGeoJson = {
+          "type": "FeatureCollection",
+          "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "LineString", "coordinates": coords}}]
+        };
+
+        await _mapController!.addSource("route-source", GeojsonSourceProperties(data: routeGeoJson));
+        await _mapController!.addLineLayer("route-source", "route-layer", const LineLayerProperties(lineColor: "#D4FF00", lineWidth: 5.0, lineCap: "round", lineJoin: "round"));
+
+        double minLat = pts.first.latitude, maxLat = pts.first.latitude;
+        double minLng = pts.first.longitude, maxLng = pts.first.longitude;
+        for (var p in pts) {
+          if (p.latitude < minLat) minLat = p.latitude; if (p.latitude > maxLat) maxLat = p.latitude;
+          if (p.longitude < minLng) minLng = p.longitude; if (p.longitude > maxLng) maxLng = p.longitude;
+        }
+
+        _mapController!.animateCamera(CameraUpdate.newLatLngBounds(
+          LatLngBounds(southwest: LatLng(minLat, minLng), northeast: LatLng(maxLat, maxLng)), 
+          top: 30, bottom: 30, left: 30, right: 30
+        ));
+      }
+    } catch (e) {
+      debugPrint("Explore card map error: $e");
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final distKm = (double.tryParse(widget.trek['distance']?.toString() ?? (widget.trek['distance_meters']?.toString() ?? '0')) ?? 0.0);
+    final elevM = (double.tryParse(widget.trek['elevation_gain']?.toString() ?? '0') ?? 0.0);
+    final difficulty = widget.trek['difficulty'] ?? 'Moderate';
+    Color badgeColor = difficulty == 'Hard' ? Colors.redAccent : (difficulty == 'Easy' ? Colors.green : Colors.orangeAccent);
+
+    final estHours = (distKm / 5.0) + (elevM / 600.0);
+    final estTimeStr = estHours < 1.0 ? '${(estHours * 60).round()} mins' : '${estHours.floor()}h ${((estHours % 1) * 60).round()}m';
+
+    final imageUrl = widget.trek['image_url'];
+    final creatorName = widget.trek['creator_name'] ?? 'Athlete';
+    final creatorAvatar = widget.trek['creator_avatar'];
+    final creatorId = widget.trek['creator_id'] ?? '';
+    
+    final bool isValidProfile = creatorId.isNotEmpty && creatorId != 'null' && creatorId.length > 10;
+
+    return GestureDetector(
+      onTap: widget.onTap,
+      child: Container(
+        height: 250, margin: const EdgeInsets.only(bottom: 16),
+        decoration: BoxDecoration(color: cardSurface, borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white10)),
+        child: Stack(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: ShaderMask(
+                shaderCallback: (rect) => LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black.withValues(alpha: 0.95)], stops: const [0.2, 1.0]).createShader(rect),
+                blendMode: BlendMode.darken,
+                child: (imageUrl != null && imageUrl.toString().isNotEmpty)
+                  ? Image.network(imageUrl, height: double.infinity, width: double.infinity, fit: BoxFit.cover, errorBuilder: (c, e, s) => Container(color: bgColor, child: const Icon(Icons.terrain, color: Colors.white24, size: 48)))
+                  : AbsorbPointer(
+                      child: MapLibreMap(
+                        onMapCreated: (controller) => _mapController = controller,
+                        onStyleLoadedCallback: _onStyleLoaded,
+                        styleString: styleDark,
+                        initialCameraPosition: const CameraPosition(target: LatLng(0, 0), zoom: 2),
+                        myLocationEnabled: false, compassEnabled: false,
                       ),
                     ),
-                  );
-                },
               ),
             ),
+            
+            Positioned(
+              top: 16, left: 16, right: 16,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  GestureDetector(
+                    onTap: () { if (isValidProfile && creatorId != 'my_android_device') Navigator.push(context, MaterialPageRoute(builder: (context) => PublicProfileScreen(userId: creatorId))); },
+                    child: Row(children: [
+                      Container(padding: const EdgeInsets.all(2), decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: neonAccent, width: 1.5)), child: CircleAvatar(radius: 14, backgroundImage: creatorAvatar != null ? NetworkImage(creatorAvatar) : null, backgroundColor: Colors.grey[800], child: creatorAvatar == null ? const Icon(Icons.person, size: 16, color: Colors.white) : null)), 
+                      const SizedBox(width: 8), 
+                      Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.6), borderRadius: BorderRadius.circular(8)), child: Text(creatorName, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)))
+                    ]),
+                  ),  
+                  if (!widget.isMyTrek && isValidProfile)
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: widget.onToggleFollow, 
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6), 
+                        decoration: BoxDecoration(color: widget.isFollowing ? Colors.black.withValues(alpha: 0.6) : neonAccent, border: widget.isFollowing ? Border.all(color: Colors.white30) : null, borderRadius: BorderRadius.circular(16)), 
+                        child: Text(widget.isFollowing ? 'Following' : 'Follow', style: TextStyle(color: widget.isFollowing ? Colors.white : Colors.black, fontSize: 12, fontWeight: FontWeight.bold))
+                      )
+                    )
+                ],
+              ),
+            ),
+
+            Positioned(
+              bottom: 16, left: 16, right: 16,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(widget.trek['name'] ?? 'Wilderness Trek', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 0.5)),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.6), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white10)),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        _buildMiniStat(Icons.straighten, '${(distKm).toStringAsFixed(1)} km'),
+                        _buildMiniStat(Icons.trending_up, '${elevM.toStringAsFixed(0)} m'),
+                        _buildMiniStat(Icons.timer_outlined, estTimeStr),
+                        Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: badgeColor.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(8), border: Border.all(color: badgeColor.withValues(alpha: 0.5))), child: Text(difficulty, style: TextStyle(color: badgeColor, fontSize: 11, fontWeight: FontWeight.bold))),
+                      ],
+                    ),
+                  )
+                ],
+              ),
+            )
           ],
         ),
       ),
@@ -316,148 +502,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
 }
 
 // ---------------------------------------------------------------------------
-// GLOBAL SEARCH DELEGATE (ATHLETES & TRAILS)
-// ---------------------------------------------------------------------------
-class GlobalSearchDelegate extends SearchDelegate<String> {
-  final Function(Map<String, dynamic>) onSelectTrek;
-  String searchMode = 'Trails'; // Default tab
-
-  GlobalSearchDelegate({required this.onSelectTrek});
-
-  @override
-  ThemeData appBarTheme(BuildContext context) {
-    return ThemeData(
-      appBarTheme: const AppBarTheme(backgroundColor: bgColor, elevation: 0),
-      scaffoldBackgroundColor: bgColor,
-      inputDecorationTheme: const InputDecorationTheme(border: InputBorder.none, hintStyle: TextStyle(color: Colors.grey)),
-      textTheme: const TextTheme(titleLarge: TextStyle(color: Colors.white, fontSize: 18)),
-      textSelectionTheme: const TextSelectionThemeData(cursorColor: neonAccent),
-    );
-  }
-
-  @override
-  List<Widget> buildActions(BuildContext context) => [if (query.isNotEmpty) IconButton(icon: const Icon(Icons.clear, color: Colors.grey), onPressed: () => query = '')];
-
-  @override
-  Widget buildLeading(BuildContext context) => IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => close(context, ''));
-
-  @override
-  Widget buildResults(BuildContext context) => _buildBody(context);
-
-  @override
-  Widget buildSuggestions(BuildContext context) => _buildBody(context);
-
-  Widget _buildBody(BuildContext context) {
-    return StatefulBuilder(
-      builder: (context, setState) {
-        return Column(
-          children: [
-            // CUSTOM TAB TOGGLE
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              color: bgColor,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => setState(() => searchMode = 'Trails'),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        decoration: BoxDecoration(color: searchMode == 'Trails' ? neonAccent : cardSurface, borderRadius: BorderRadius.circular(12)),
-                        alignment: Alignment.center,
-                        child: Text('Trails', style: TextStyle(fontWeight: FontWeight.bold, color: searchMode == 'Trails' ? Colors.black : Colors.white)),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => setState(() => searchMode = 'Athletes'),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        decoration: BoxDecoration(color: searchMode == 'Athletes' ? neonAccent : cardSurface, borderRadius: BorderRadius.circular(12)),
-                        alignment: Alignment.center,
-                        child: Text('Athletes', style: TextStyle(fontWeight: FontWeight.bold, color: searchMode == 'Athletes' ? Colors.black : Colors.white)),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            
-            // RESULTS LIST
-            Expanded(
-              child: query.trim().isEmpty
-                  ? Center(child: Text('Search for ${searchMode.toLowerCase()} by name or hashtag...', style: const TextStyle(color: Colors.grey)))
-                  : _buildSearchResults(context, searchMode),
-            )
-          ],
-        );
-      }
-    );
-  }
-
-  Widget _buildSearchResults(BuildContext context, String mode) {
-    if (mode == 'Athletes') {
-      return FutureBuilder<List<dynamic>>(
-        future: Supabase.instance.client.from('profiles').select().or('display_name.ilike.%${query.trim()}%,username.ilike.%${query.trim()}%').limit(20),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: neonAccent));
-          final results = snapshot.data ?? [];
-          if (results.isEmpty) return const Center(child: Text('No athletes found.', style: TextStyle(color: Colors.grey)));
-
-          return ListView.builder(
-            itemCount: results.length,
-            itemBuilder: (context, index) {
-              final user = results[index];
-              if (user['id'] == Supabase.instance.client.auth.currentUser?.id) return const SizedBox.shrink();
-              return ListTile(
-                leading: CircleAvatar(backgroundColor: neonAccent, backgroundImage: user['avatar_url'] != null ? NetworkImage(user['avatar_url']) : null, child: user['avatar_url'] == null ? const Icon(Icons.person, color: Colors.black) : null),
-                title: Text(user['display_name'] ?? 'Athlete', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                subtitle: Text(user['username'] != null ? '@${user['username']}' : '', style: const TextStyle(color: Colors.grey)),
-                onTap: () { close(context, ''); Navigator.push(context, MaterialPageRoute(builder: (_) => PublicProfileScreen(userId: user['id']))); },
-              );
-            },
-          );
-        },
-      );
-    } else {
-      // SEARCHING TRAILS BY NAME OR HASHTAG
-      String cleanQuery = query.trim().replaceAll('#', '');
-      
-      return FutureBuilder<List<dynamic>>(
-        future: Supabase.instance.client.rpc('search_treks', params: {'search_term': cleanQuery}),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: neonAccent));
-          
-          if (snapshot.hasError) return Center(child: Text('Search error: ${snapshot.error}', style: const TextStyle(color: Colors.redAccent)));
-          
-          final results = snapshot.data ?? [];
-          if (results.isEmpty) return const Center(child: Text('No trails found. Try another keyword!', style: TextStyle(color: Colors.grey)));
-
-          return ListView.builder(
-            itemCount: results.length,
-            itemBuilder: (context, index) {
-              final trek = results[index];
-              final imageUrl = trek['image_url'] ?? 'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?q=80&w=600&auto=format&fit=crop';
-              
-              return ListTile(
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                leading: ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.network(imageUrl, width: 60, height: 60, fit: BoxFit.cover)),
-                title: Text(trek['name'] ?? 'Trek', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                subtitle: Text('${((trek['distance_meters'] as num) / 1000).toStringAsFixed(1)} km • ${trek['difficulty']}', style: const TextStyle(color: neonAccent)),
-                onTap: () { close(context, ''); Navigator.push(context, MaterialPageRoute(builder: (_) => TrailDetailScreen(trek: trek, onStartTrail: () => onSelectTrek(trek)))); },
-              );
-            },
-          );
-        },
-      );
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// GPX PARSER HELPER
+// GPX PARSER HELPER (Unchanged)
 // ---------------------------------------------------------------------------
 class GPXHelper {
   static Future<void> exportAndShareTrek(Map<String, dynamic> trek) async {
